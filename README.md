@@ -1,6 +1,8 @@
 # sdk-shared-actions
 
-Shared GitHub Actions for the Phenoml SDK repos.
+Shared GitHub Actions and reusable workflows for the Phenoml SDK repos.
+
+## Actions
 
 - [`bundle-openapi-spec`](bundle-openapi-spec/README.md) — fetches the
   combined OpenAPI spec for an SDK's source commit and auto-commits it
