@@ -1,0 +1,19 @@
+{
+    "mappings": [
+        {
+            "id": "fixture-auth-token",
+            "name": "OAuth token endpoint",
+            "request": {
+                "urlPathTemplate": "/v2/auth/token",
+                "method": "POST"
+            },
+            "response": {
+                "status": 200,
+                "body": "{\n  \"access_token\": \"test-token\",\n  \"expires_in\": 3600\n}",
+                "headers": {
+                    "Content-Type": "application/json"
+                }
+            }
+        }
+    ]
+}
