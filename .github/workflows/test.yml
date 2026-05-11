@@ -11,7 +11,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Add new actions here as they're added at the repo root.
+        # Bun/TypeScript actions with their own package.json + bun.lock + tests.
+        # Only add JS-based actions here — other action types (shell-only
+        # composites, Docker actions, reusable workflows) have their own
+        # validation patterns and don't fit this matrix.
         action:
           - extract-code-examples
     steps:
