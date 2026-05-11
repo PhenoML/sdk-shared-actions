@@ -706,12 +706,6 @@ function pyExtractTestExamples(
     return examples;
 }
 
-// Parses kwargs out of a captured Python SDK call source like
-// `client.foo.bar(name="x", items=[1, 2])`. Returns `{name, value}` pairs in
-// call order. Values are JSON-parsed after translating Python's True/False/None
-// to their JSON equivalents; anything that can't be parsed comes back as a
-// raw `<expr:...>` string (matching the TS parser's escape hatch).
-//
 // Hand-rolled because Node has no Python AST. Naive about exotic Python
 // (single-quoted strings work, but f-strings, triple-quoted strings, and
 // concatenated literals aren't handled) — fine for Fern-generated test
@@ -730,39 +724,15 @@ function pyParseKwargs(callSource: string): Array<{ name: string; value: unknown
     return out;
 }
 
-// Returns the substring between the outermost `(...)` of `callSource`, or
-// null if no balanced pair is found. String-literal aware so parens inside
-// quoted strings don't shift depth.
-function pyExtractArgsPortion(callSource: string): string | null {
-    const open = callSource.indexOf("(");
-    if (open < 0) return null;
+// Iterates `s` yielding each character outside of Python string literals,
+// along with the current nesting depth across `()`, `[]`, and `{}`. Single-
+// and double-quoted strings are skipped with backslash-escape awareness.
+// `depth` reflects the value AFTER any bracket update for the yielded char,
+// so the outermost `)` of a balanced call is yielded with depth 0.
+function* pyWalkTopLevel(s: string): Generator<{ ch: string; i: number; depth: number }> {
     let depth = 0;
     let inString = false;
     let quote = "";
-    for (let i = open; i < callSource.length; i++) {
-        const ch = callSource[i];
-        if (inString) {
-            if (ch === "\\" && i + 1 < callSource.length) { i++; continue; }
-            if (ch === quote) inString = false;
-            continue;
-        }
-        if (ch === '"' || ch === "'") { inString = true; quote = ch; continue; }
-        if (ch === "(") depth++;
-        else if (ch === ")") {
-            depth--;
-            if (depth === 0) return callSource.slice(open + 1, i);
-        }
-    }
-    return null;
-}
-
-// Splits at top-level commas, respecting nested (), [], {} and string literals.
-function pySplitTopLevel(s: string): string[] {
-    const out: string[] = [];
-    let depth = 0;
-    let inString = false;
-    let quote = "";
-    let start = 0;
     for (let i = 0; i < s.length; i++) {
         const ch = s[i];
         if (inString) {
@@ -773,7 +743,24 @@ function pySplitTopLevel(s: string): string[] {
         if (ch === '"' || ch === "'") { inString = true; quote = ch; continue; }
         if (ch === "(" || ch === "[" || ch === "{") depth++;
         else if (ch === ")" || ch === "]" || ch === "}") depth--;
-        else if (ch === "," && depth === 0) {
+        yield { ch, i, depth };
+    }
+}
+
+function pyExtractArgsPortion(callSource: string): string | null {
+    const open = callSource.indexOf("(");
+    if (open < 0) return null;
+    for (const { ch, i, depth } of pyWalkTopLevel(callSource.slice(open))) {
+        if (ch === ")" && depth === 0) return callSource.slice(open + 1, open + i);
+    }
+    return null;
+}
+
+function pySplitTopLevel(s: string): string[] {
+    const out: string[] = [];
+    let start = 0;
+    for (const { ch, i, depth } of pyWalkTopLevel(s)) {
+        if (ch === "," && depth === 0) {
             const part = s.slice(start, i).trim();
             if (part) out.push(part);
             start = i + 1;
@@ -784,23 +771,10 @@ function pySplitTopLevel(s: string): string[] {
     return out;
 }
 
-// Returns the index of the first top-level `=` that is an assignment
-// (skipping `==`), or -1 if none. Respects nesting and string literals.
+// Skips `==` so comparison expressions aren't mistaken for assignment.
 function pyFindTopLevelEquals(s: string): number {
-    let depth = 0;
-    let inString = false;
-    let quote = "";
-    for (let i = 0; i < s.length; i++) {
-        const ch = s[i];
-        if (inString) {
-            if (ch === "\\" && i + 1 < s.length) { i++; continue; }
-            if (ch === quote) inString = false;
-            continue;
-        }
-        if (ch === '"' || ch === "'") { inString = true; quote = ch; continue; }
-        if (ch === "(" || ch === "[" || ch === "{") depth++;
-        else if (ch === ")" || ch === "]" || ch === "}") depth--;
-        else if (ch === "=" && depth === 0 && s[i + 1] !== "=") return i;
+    for (const { ch, i, depth } of pyWalkTopLevel(s)) {
+        if (ch === "=" && depth === 0 && s[i + 1] !== "=") return i;
     }
     return -1;
 }
@@ -1378,12 +1352,6 @@ function findTemplateMatch(
     return undefined;
 }
 
-// Fallback for languages whose test-bodies don't include an explicit
-// request-body literal (Python kwargs-style). Builds a body object from
-// kwarg-shaped sdkCallArgs, excluding any kwarg whose name appears as a
-// `{name}` slot in the path template. Returns null for methods that don't
-// carry a body (GET/DELETE/HEAD/OPTIONS) or when no body kwargs remain.
-//
 // Imperfect: query/header params can't be distinguished from body params
 // at the call site, so they may leak into the body object. Fern's typical
 // shape (body kwargs in the JSON, headers/query passed separately at the
