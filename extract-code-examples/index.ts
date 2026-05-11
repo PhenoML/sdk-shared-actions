@@ -558,7 +558,10 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
             const httpMethod = pyExtractHttpMethod(lines, i);
 
             if (httpPath && httpMethod) {
-                const normalizedPath = normalizePath(httpPath);
+                // Also snake_case path-param names (Fern Python paths already
+                // use snake_case in practice, but match the TS/Java parsers
+                // so manifest keys stay consistent if that ever changes).
+                const normalizedPath = normalizePathParams(normalizePath(httpPath));
                 const key = `${httpMethod} ${normalizedPath}`;
                 if (!seen.has(key)) {
                     seen.add(key);

@@ -279,12 +279,22 @@ describe("Python parser (Authtoken auth fixture)", () => {
     const examples = parser.parseTestExamples(root);
 
     test("parseEndpoints extracts get_token", () => {
-        expect(endpoints).toHaveLength(1);
-        expect(endpoints[0]).toMatchObject({
+        const getToken = endpoints.find((e) => e.methodName === "get_token");
+        expect(getToken).toMatchObject({
             httpMethod: "POST",
             httpPath: "/v2/auth/token",
-            methodName: "get_token",
             methodChain: ["authtoken", "auth", "get_token"],
+        });
+    });
+
+    test("parseEndpoints snake_cases camelCase path parameters", () => {
+        // The synthetic users/raw_client.py uses f"users/{jsonable_encoder(userId)}".
+        // Without normalizePathParams the manifest key would be /users/{userId},
+        // diverging from the TS/Java parsers which always emit snake_case.
+        const getUser = endpoints.find((e) => e.methodName === "get_user");
+        expect(getUser).toMatchObject({
+            httpMethod: "GET",
+            httpPath: "/users/{user_id}",
         });
     });
 
