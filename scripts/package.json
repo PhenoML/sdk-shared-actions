@@ -1,6 +1,9 @@
 {
   "name": "extract-code-examples",
   "private": true,
+  "scripts": {
+    "test": "bun test extract-code-examples"
+  },
   "dependencies": {
     "typescript": "~5.7.2"
   }

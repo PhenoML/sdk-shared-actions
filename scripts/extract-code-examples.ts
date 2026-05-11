@@ -633,9 +633,11 @@ function pyExtractTestExamples(
         let sdkCallSource = "";
 
         for (let j = i + 1; j < Math.min(i + 60, lines.length); j++) {
-            const line = lines[j].trim();
-            // Next test function = end of this test
-            if (/^def\s+test_/.test(line)) break;
+            const rawLine = lines[j];
+            const line = rawLine.trim();
+            // Next top-level test function ends this test. Anchor to column 0
+            // (raw line) so indented nested `def test_*` helpers don't terminate.
+            if (/^def\s+test_/.test(rawLine)) break;
 
             // verify_request_count(test_id, "METHOD", "/path", ...)
             const verifyMatch = line.match(/verify_request_count\s*\([^,]+,\s*"(\w+)"\s*,\s*"([^"]+)"/);
@@ -670,15 +672,10 @@ function pyExtractTestExamples(
                 for (const [wmKey, wm] of wiremockMap) {
                     if (!wmKey.startsWith(httpMethod + " ")) continue;
                     const wmPath = wmKey.slice(httpMethod.length + 1);
-                    const wmSegs = wmPath.split("/");
-                    const concreteSegs = httpPath.split("/");
-                    if (wmSegs.length !== concreteSegs.length) continue;
-                    let matches = true;
-                    for (let s = 0; s < wmSegs.length; s++) {
-                        if (wmSegs[s].startsWith("{") && wmSegs[s].endsWith("}")) continue;
-                        if (wmSegs[s] !== concreteSegs[s]) { matches = false; break; }
+                    if (pathMatchesTemplate(wmPath, httpPath)) {
+                        responseBody = wm.responseBody;
+                        break;
                     }
-                    if (matches) { responseBody = wm.responseBody; break; }
                 }
             }
 
@@ -758,6 +755,56 @@ function createJavaParser(): LanguageParser {
     };
 }
 
+// Returns the net `{` - `}` count for a single line, ignoring braces inside
+// string literals, char literals, line comments, block comments, and text
+// blocks. Block-comment and text-block state persists across lines via `state`.
+function javaCountBraceDelta(
+    line: string,
+    state: { inBlockComment: boolean; inTextBlock: boolean },
+): number {
+    let delta = 0;
+    let inString = false;
+    let inChar = false;
+    let c = 0;
+    while (c < line.length) {
+        const ch = line[c];
+        const next = line[c + 1];
+
+        if (state.inBlockComment) {
+            if (ch === "*" && next === "/") { state.inBlockComment = false; c += 2; continue; }
+            c++;
+            continue;
+        }
+        if (state.inTextBlock) {
+            if (ch === '"' && next === '"' && line[c + 2] === '"') { state.inTextBlock = false; c += 3; continue; }
+            c++;
+            continue;
+        }
+        if (inString) {
+            if (ch === "\\") { c += 2; continue; }
+            if (ch === '"') { inString = false; c++; continue; }
+            c++;
+            continue;
+        }
+        if (inChar) {
+            if (ch === "\\") { c += 2; continue; }
+            if (ch === "'") { inChar = false; c++; continue; }
+            c++;
+            continue;
+        }
+
+        if (ch === "/" && next === "/") break; // line comment: skip rest of line
+        if (ch === "/" && next === "*") { state.inBlockComment = true; c += 2; continue; }
+        if (ch === '"' && next === '"' && line[c + 2] === '"') { state.inTextBlock = true; c += 3; continue; }
+        if (ch === '"') { inString = true; c++; continue; }
+        if (ch === "'") { inChar = true; c++; continue; }
+        if (ch === "{") delta++;
+        else if (ch === "}") delta--;
+        c++;
+    }
+    return delta;
+}
+
 function javaFindResourcesDir(rawClientFiles: string[]): string {
     // Find the common "resources" parent directory
     for (const f of rawClientFiles) {
@@ -782,19 +829,23 @@ function javaExtractEndpoints(filePath: string, resourcesDir: string): EndpointM
     let braceDepth = 0;
     let methodBraceDepth = 0;
     const seen = new Set<string>();
+    // Lexer state that persists across lines for constructs that can span lines.
+    const lexState = { inBlockComment: false, inTextBlock: false };
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
 
-        // Track brace depth for method boundaries
-        for (const ch of line) {
-            if (ch === "{") braceDepth++;
-            if (ch === "}") braceDepth--;
-        }
+        // Track brace depth for method boundaries, ignoring braces that appear
+        // inside string literals, char literals, or comments (e.g. JSON
+        // fragments like "{\"key\":" would otherwise corrupt the count).
+        braceDepth += javaCountBraceDelta(line, lexState);
 
-        // Find method definition (only methods that return PhenomlClientHttpResponse)
+        // Find method definition (only methods that return PhenomlClientHttpResponse).
+        // Use greedy `.+` so nested generics like `Optional<Foo>` backtrack to land
+        // on the outermost `>` before the method name; `[^>]+` would stop at the
+        // first inner `>` and miss the match entirely.
         const methodMatch = line.match(
-            /public\s+PhenomlClientHttpResponse<[^>]+>\s+(\w+)\s*\(/,
+            /public\s+PhenomlClientHttpResponse<.+>\s+(\w+)\s*\(/,
         );
         if (methodMatch) {
             // Save previous method if it had HTTP details
@@ -1035,6 +1086,20 @@ function isBalancedParens(str: string): boolean {
     return depth === 0;
 }
 
+// True if `concretePath` matches `templatePath` segment-by-segment, treating
+// any "{name}" segment in the template as a wildcard. e.g. "/agent/{id}"
+// matches "/agent/abc123".
+function pathMatchesTemplate(templatePath: string, concretePath: string): boolean {
+    const tmpl = templatePath.split("/");
+    const concrete = concretePath.split("/");
+    if (tmpl.length !== concrete.length) return false;
+    for (let i = 0; i < tmpl.length; i++) {
+        if (tmpl[i].startsWith("{") && tmpl[i].endsWith("}")) continue;
+        if (tmpl[i] !== concrete[i]) return false;
+    }
+    return true;
+}
+
 // ============================================================
 // Manifest builder
 // ============================================================
@@ -1044,22 +1109,9 @@ function findTemplateMatch(
     concretePath: string,
     endpointMap: Map<string, EndpointMapping>,
 ): EndpointMapping | undefined {
-    const concreteSegments = concretePath.split("/");
     for (const [, endpoint] of endpointMap) {
         if (endpoint.httpMethod !== httpMethod) continue;
-        const templateSegments = endpoint.httpPath.split("/");
-        if (templateSegments.length !== concreteSegments.length) continue;
-        let matches = true;
-        for (let i = 0; i < templateSegments.length; i++) {
-            const tmpl = templateSegments[i];
-            const concrete = concreteSegments[i];
-            if (tmpl.startsWith("{") && tmpl.endsWith("}")) continue;
-            if (tmpl !== concrete) {
-                matches = false;
-                break;
-            }
-        }
-        if (matches) return endpoint;
+        if (pathMatchesTemplate(endpoint.httpPath, concretePath)) return endpoint;
     }
     return undefined;
 }
@@ -1217,7 +1269,36 @@ async function main() {
     console.error(`\nManifest written to ${outputPath}`);
 }
 
-main().catch((err) => {
-    console.error("Error:", err);
-    process.exit(1);
-});
+// Run main() only when executed directly (not when imported, e.g. from tests).
+if (import.meta.main) {
+    main().catch((err) => {
+        console.error("Error:", err);
+        process.exit(1);
+    });
+}
+
+// Exports for testing. Internal helpers — not a stable public API.
+export {
+    camelToSnake,
+    createJavaParser,
+    createPythonParser,
+    createTypeScriptParser,
+    findTemplateMatch,
+    isBalancedParens,
+    javaCountBraceDelta,
+    javaDeriveMethodChain,
+    javaExtractConcatenatedString,
+    javaExtractEndpoints,
+    javaExtractSetBody,
+    javaExtractTestExamples,
+    javaUnescape,
+    normalizePath,
+    normalizePathParams,
+    pyDeriveMethodChain,
+    pyExtractEndpoints,
+    pyExtractHttpMethod,
+    pyExtractRequestPath,
+    pyExtractTestExamples,
+    tsExtractEndpoints,
+    tsExtractTestExamples,
+};
