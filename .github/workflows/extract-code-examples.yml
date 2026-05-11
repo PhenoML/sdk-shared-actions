@@ -13,7 +13,10 @@ jobs:
       - name: Checkout caller repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ github.head_ref }}
+          # head_ref is set on PR events; ref_name covers push and other
+          # events so checkout lands on a named branch (not detached HEAD)
+          # and the later `git push` has somewhere to go.
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Checkout shared actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
