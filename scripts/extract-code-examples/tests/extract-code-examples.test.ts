@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import * as path from "path";
 import {
+    buildManifest,
     camelToSnake,
     createJavaParser,
     createPythonParser,
@@ -288,16 +289,27 @@ describe("Python parser (Authtoken auth fixture)", () => {
     });
 
     test("parseTestExamples extracts the wire test and looks up the WireMock response", () => {
-        expect(examples).toHaveLength(1);
-        expect(examples[0]).toMatchObject({
-            httpMethod: "POST",
-            httpPath: "/v2/auth/token",
-        });
+        // Fixture has two test files (test_authtoken_auth.py + test_long_body.py),
+        // both targeting POST /v2/auth/token.
+        expect(examples.length).toBeGreaterThanOrEqual(1);
+        const example = examples.find((e) => e.httpMethod === "POST" && e.httpPath === "/v2/auth/token");
+        expect(example).toBeDefined();
         // Response body was populated from wiremock/wiremock-mappings.json
-        expect(examples[0].responseBody).toEqual({
+        expect(example!.responseBody).toEqual({
             access_token: "test-token",
             expires_in: 3600,
         });
+    });
+
+    test("parseTestExamples scans past 60 lines of test body", () => {
+        // The test_long_body fixture places its SDK call + verify_request_count
+        // at ~line 78. An earlier 60-line cap would silently drop this entry.
+        const longBody = examples.find(
+            (e) => e.httpMethod === "POST" && e.httpPath === "/v2/auth/token" && e.sdkCallSource.includes("client.authtoken.auth.get_token"),
+        );
+        expect(longBody).toBeDefined();
+        // Both test files should yield an example (no truncation drops one).
+        expect(examples.filter((e) => e.httpPath === "/v2/auth/token").length).toBe(2);
     });
 });
 
@@ -329,5 +341,79 @@ describe("Java parser (AuthtokenAuth fixture)", () => {
         // SDK call source is preserved with chained calls
         expect(ex.sdkCallSource).toContain("client.authtoken()");
         expect(ex.sdkCallSource).toContain(".generateToken(");
+    });
+});
+
+// ============================================================
+// buildManifest — chain-index collision handling
+// ============================================================
+
+describe("buildManifest chain-index", () => {
+    const metadata = {
+        generatorName: "fernapi/fern-java-sdk",
+        sdkVersion: "0.0.0",
+        originGitCommit: "deadbeef",
+    };
+
+    test("matches a Java example by chain when httpPath is missing", () => {
+        const endpoints = [
+            {
+                httpMethod: "POST",
+                httpPath: "/agent/prompts/create",
+                methodChain: ["agent", "prompts", "create"],
+                methodName: "create",
+            },
+        ];
+        const examples = [
+            {
+                httpMethod: "POST",
+                httpPath: "",
+                methodName: "create",
+                describeBlock: "AgentPromptsWireTest.java",
+                requestBody: { name: "x" },
+                responseBody: { id: "y" },
+                sdkCallArgs: [],
+                sdkCallSource: "client.agent().prompts().create(...)",
+            },
+        ];
+        const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
+        expect(Object.keys(manifest.examples)).toEqual(["POST /agent/prompts/create"]);
+        expect(manifest.examples["POST /agent/prompts/create"].request.body).toEqual({ name: "x" });
+    });
+
+    test("drops the ambiguous entry when two chains collide on the same key", () => {
+        // ["agent", "prompts"] and ["agentp", "rompts"] both lowercase-concat
+        // to "agentprompts" and would silently map a single test example to
+        // whichever endpoint happens to be indexed last. The fix removes both
+        // from the chain index so lookup misses instead of guessing wrong.
+        const endpoints = [
+            {
+                httpMethod: "POST",
+                httpPath: "/agent/prompts/create",
+                methodChain: ["agent", "prompts", "create"],
+                methodName: "create",
+            },
+            {
+                httpMethod: "POST",
+                httpPath: "/agentp/rompts/create",
+                methodChain: ["agentp", "rompts", "create"],
+                methodName: "create",
+            },
+        ];
+        const examples = [
+            {
+                httpMethod: "POST",
+                httpPath: "",
+                methodName: "create",
+                describeBlock: "AgentPromptsWireTest.java",
+                requestBody: null,
+                responseBody: null,
+                sdkCallArgs: [],
+                sdkCallSource: "",
+            },
+        ];
+        const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
+        // Neither endpoint should be matched via the (now-dropped) chain index.
+        expect(Object.keys(manifest.examples)).toEqual([]);
     });
 });

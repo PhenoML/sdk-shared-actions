@@ -632,7 +632,10 @@ function pyExtractTestExamples(
         let httpPath: string | null = null;
         let sdkCallSource = "";
 
-        for (let j = i + 1; j < Math.min(i + 60, lines.length); j++) {
+        // Scan to end of file; the loop terminates at the next top-level
+        // `def test_*` below. An earlier fixed cap (60 lines) silently
+        // truncated longer generated wire tests, dropping their entries.
+        for (let j = i + 1; j < lines.length; j++) {
             const rawLine = lines[j];
             const line = rawLine.trim();
             // Next top-level test function ends this test. Anchor to column 0
@@ -1124,13 +1127,27 @@ function buildManifest(
     metadata: FernMetadata,
 ): Manifest {
     const endpointMap = new Map<string, EndpointMapping>();
-    // Secondary index for chain-based matching (Java tests don't have httpPath)
-    // Key: method chain prefix (all but last segment) joined without separator + "." + method name
+    // Secondary index for chain-based matching (Java tests don't have httpPath).
+    // Key: lowercased concat of chain-prefix segments + "." + methodName. Two
+    // different chains can collapse to the same key (e.g. ["agent","prompts"]
+    // and ["agentp","rompts"] both → "agentprompts"); when that happens we
+    // drop the ambiguous entry so lookup misses loudly rather than silently
+    // returning the wrong endpoint.
     const chainIndex = new Map<string, EndpointMapping>();
+    const chainCollisions = new Set<string>();
     for (const ep of allEndpoints) {
         endpointMap.set(`${ep.httpMethod} ${ep.httpPath}`, ep);
         const prefix = ep.methodChain.slice(0, -1).join("").toLowerCase();
-        chainIndex.set(`${prefix}.${ep.methodName.toLowerCase()}`, ep);
+        const key = `${prefix}.${ep.methodName.toLowerCase()}`;
+        const existing = chainIndex.get(key);
+        if (existing && existing !== ep) {
+            chainCollisions.add(key);
+        }
+        chainIndex.set(key, ep);
+    }
+    for (const key of chainCollisions) {
+        console.error(`  WARNING: chain-index collision for "${key}"; dropping ambiguous entry`);
+        chainIndex.delete(key);
     }
 
     const manifest: Manifest = {
@@ -1279,6 +1296,7 @@ if (import.meta.main) {
 
 // Exports for testing. Internal helpers — not a stable public API.
 export {
+    buildManifest,
     camelToSnake,
     createJavaParser,
     createPythonParser,
