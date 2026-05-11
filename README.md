@@ -1,8 +1,6 @@
 # sdk-shared-actions
 
 Shared GitHub Actions and reusable workflows for the Phenoml SDK repos.
-Each top-level directory is a composite action that SDK repos can invoke
-via `uses:`; reusable workflows live under `.github/workflows/`.
 
 ## Actions
 
