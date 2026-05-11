@@ -1,0 +1,79 @@
+name: bundle-openapi-spec
+
+# Reusable workflow: fetches the combined OpenAPI spec for the SDK's source
+# commit from GCS and auto-commits it to the calling PR's branch.
+#
+# Trigger this from each SDK repo on PRs that change .fern/metadata.json
+# (i.e. Fern opening or updating a generated-SDK PR with a new
+# originGitCommit). The spec itself is published to GCS by phenoml_backend's
+# publish-openapi-specs.yml workflow keyed by the same commit SHA.
+
+on:
+  workflow_call:
+    inputs:
+      metadata-path:
+        description: "Path to Fern's metadata.json within the caller repo."
+        type: string
+        default: ".fern/metadata.json"
+      output-path:
+        description: "Where to write the bundled spec within the caller repo."
+        type: string
+        default: "openapi/openapi.json"
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Fork PRs can't push back to the head branch, and we don't want to leak
+    # tokens to forked code anyway. Fern's bot opens PRs from same-repo
+    # branches, so this only excludes the (currently unused) fork path.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
+    env:
+      # Quoted indirection: keeps untrusted ref values out of inline ${{ }}
+      # shell expansions per GitHub's workflow-injection guidance.
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      METADATA_PATH: ${{ inputs.metadata-path }}
+      OUTPUT_PATH: ${{ inputs.output-path }}
+
+    steps:
+      - name: Checkout caller PR branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.HEAD_REF }}
+
+      - name: Checkout shared actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: PhenoML/sdk-shared-actions
+          # workflow_sha pins the script to the exact commit of this workflow,
+          # so callers pinning `@v1` get a self-consistent bundle.
+          ref: ${{ github.workflow_sha }}
+          path: .sdk-shared-actions
+
+      - name: Set up node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+
+      - name: Fetch combined OpenAPI spec
+        env:
+          PHENOML_OPENAPI_METADATA_PATH: ${{ env.METADATA_PATH }}
+          PHENOML_OPENAPI_OUTPUT_PATH: ${{ env.OUTPUT_PATH }}
+        run: node .sdk-shared-actions/scripts/fetch-openapi-spec.js
+
+      - name: Commit spec if changed
+        run: |
+          if git diff --quiet -- "$OUTPUT_PATH"; then
+            echo "Spec unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$OUTPUT_PATH"
+          commit_sha=$(jq -r .originGitCommit "$METADATA_PATH")
+          git commit -m "chore: bundle OpenAPI spec for ${commit_sha}"
+          git push
+
+      - name: Clean up shared actions checkout
+        if: always()
+        run: rm -rf .sdk-shared-actions

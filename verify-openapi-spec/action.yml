@@ -1,0 +1,25 @@
+name: Verify bundled OpenAPI spec
+description: >-
+  Verifies that an SDK has a valid bundled OpenAPI spec matching the source
+  commit recorded by Fern. Intended for use in SDK publish jobs as a
+  safety net for the bundle-openapi-spec reusable workflow.
+
+inputs:
+  metadata-path:
+    description: "Path to Fern's metadata.json within the caller repo."
+    default: ".fern/metadata.json"
+  spec-path:
+    description: "Path to the bundled OpenAPI spec within the caller repo."
+    default: "openapi/openapi.json"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify
+      shell: bash
+      env:
+        PHENOML_OPENAPI_METADATA_PATH: ${{ inputs.metadata-path }}
+        PHENOML_OPENAPI_SPEC_PATH: ${{ inputs.spec-path }}
+      # $GITHUB_ACTION_PATH points at this action's checkout, which lets us
+      # reference verify.js independent of the caller's working directory.
+      run: node "$GITHUB_ACTION_PATH/verify.js"
