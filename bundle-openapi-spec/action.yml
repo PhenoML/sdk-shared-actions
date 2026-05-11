@@ -29,10 +29,14 @@ runs:
         fi
         echo "Fetching OpenAPI spec for originGitCommit=$commit_sha"
         mkdir -p "$(dirname "$OUTPUT_PATH")"
-        # --retry-all-errors covers 404s while GCS upload is still in flight;
-        # --retry-max-time caps the total wait at ~5 minutes.
+        # Probe every 5s for up to ~5 minutes while the upstream GCS upload
+        # may still be in flight. --retry-all-errors is needed to retry on
+        # 404s (default --retry only retries 5xx/transient); --retry-delay
+        # forces a fixed cadence (which disables curl's default exponential
+        # backoff, so the retry count has to cover the whole budget itself).
+        # --retry-max-time is a wall-clock safety net.
         curl --fail --silent --show-error \
-          --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
+          --retry 60 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
           -o "$OUTPUT_PATH" \
           "https://storage.googleapis.com/phenoml-openapi-specs/combined/specs-${commit_sha}.json"
 
