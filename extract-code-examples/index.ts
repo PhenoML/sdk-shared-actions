@@ -841,7 +841,8 @@ function javaExtractEndpoints(filePath: string, resourcesDir: string): EndpointM
         // Track brace depth for method boundaries, ignoring braces that appear
         // inside string literals, char literals, or comments (e.g. JSON
         // fragments like "{\"key\":" would otherwise corrupt the count).
-        braceDepth += javaCountBraceDelta(line, lexState);
+        const delta = javaCountBraceDelta(line, lexState);
+        braceDepth += delta;
 
         // Find method definition (only methods that return PhenomlClientHttpResponse).
         // Use greedy `.+` so nested generics like `Optional<Foo>` backtrack to land
@@ -864,11 +865,22 @@ function javaExtractEndpoints(filePath: string, resourcesDir: string): EndpointM
             pathSegments = [];
             httpMethod = null;
             collectingPath = false;
-            methodBraceDepth = braceDepth;
+            // methodBraceDepth is the brace depth INSIDE the method body. When
+            // the signature ends on this line (`{` is here, delta > 0),
+            // braceDepth already reflects that. When the signature spans
+            // multiple lines and `{` comes later, anticipate the body open
+            // with +1 so the closing `}` reliably triggers `braceDepth <
+            // methodBraceDepth` instead of returning to exactly methodBraceDepth.
+            methodBraceDepth = delta > 0 ? braceDepth : braceDepth + 1;
         }
 
-        // Reset on method exit (brace depth returns to pre-method level)
-        if (currentMethod && braceDepth < methodBraceDepth) {
+        // Reset on method exit (brace depth returns to pre-method level).
+        // `else if` rather than `if` so we don't fire the exit on the very
+        // same line where methodMatch just (re)set methodBraceDepth — with
+        // the multi-line-signature anticipation (+1), braceDepth would
+        // immediately satisfy `< methodBraceDepth` and short-circuit the
+        // newly-started method.
+        else if (currentMethod && braceDepth < methodBraceDepth) {
             if (httpMethod && pathSegments.length > 0) {
                 const httpPath = normalizePath(pathSegments.join("/"));
                 const key = `${httpMethod} ${httpPath}`;

@@ -344,6 +344,25 @@ describe("Java parser (AuthtokenAuth fixture)", () => {
     });
 });
 
+describe("Java parser (multi-line signature fixture)", () => {
+    const root = path.join(FIXTURES, "java-multiline");
+    const endpoints = createJavaParser().parseEndpoints(root);
+
+    test("exits at the actual closing brace so helpers don't corrupt collected state", () => {
+        // Both API methods use path "/things". A broken method-exit would let
+        // the intermediate private helper's "PUT /wrong/path" overwrite
+        // getThing's state, causing the manifest to attribute "PUT /wrong/path"
+        // to getThing instead of "GET /things".
+        const getThing = endpoints.find((e) => e.methodName === "getThing");
+        const postThing = endpoints.find((e) => e.methodName === "postThing");
+        expect(getThing).toMatchObject({ httpMethod: "GET", httpPath: "/things" });
+        expect(postThing).toMatchObject({ httpMethod: "POST", httpPath: "/things" });
+        // The helper's "PUT /wrong/path" must never appear.
+        expect(endpoints.some((e) => e.httpPath === "/wrong/path")).toBe(false);
+        expect(endpoints.some((e) => e.httpMethod === "PUT")).toBe(false);
+    });
+});
+
 // ============================================================
 // buildManifest — chain-index collision handling
 // ============================================================
