@@ -593,12 +593,14 @@ function pyExtractRequestPath(lines: string[], startLine: number): string | null
     // It's the first positional argument, on the same line or next few lines.
     for (let i = startLine; i < Math.min(startLine + 5, lines.length); i++) {
         const line = lines[i].trim();
-        // f-string path: f"path/{jsonable_encoder(id)}"
+        // f-string path: f"path/{encode_path_param(id)}". Strip any single
+        // function wrapper around the param so the template uses just the
+        // bare name (matches the OpenAPI shape and the TS/Java parsers).
+        // Fern has used several wrapper names over time — jsonable_encoder,
+        // url_encode, encode_path_param — so match generically.
         const fMatch = line.match(/f"([^"]+)"/);
         if (fMatch) {
-            return fMatch[1]
-                .replace(/\{jsonable_encoder\((\w+)\)\}/g, "{$1}")
-                .replace(/\{url_encode\((\w+)\)\}/g, "{$1}");
+            return fMatch[1].replace(/\{\w+\((\w+)\)\}/g, "{$1}");
         }
         // Simple string path: "path/here"  (but not method="POST" or headers=)
         const simpleMatch = line.match(/^"([^"]+)"\s*,/);

@@ -346,6 +346,23 @@ describe("pyExtractRequestPath", () => {
         ];
         expect(pyExtractRequestPath(lines, 0)).toBe("agent/{agent_id}");
     });
+    test("strips encode_path_param() wrappers (current Fern Python helper)", () => {
+        // Fern's current Python generator emits `encode_path_param(...)`.
+        // Older versions used jsonable_encoder/url_encode — the parser
+        // accepts any single-function wrapper.
+        const lines = [
+            "_response = self._client_wrapper.httpx_client.request(",
+            '    f"agent/{encode_path_param(id)}",',
+        ];
+        expect(pyExtractRequestPath(lines, 0)).toBe("agent/{id}");
+    });
+    test("leaves bare {param} placeholders unchanged", () => {
+        const lines = [
+            "_response = self._client_wrapper.httpx_client.request(",
+            '    f"agent/{id}",',
+        ];
+        expect(pyExtractRequestPath(lines, 0)).toBe("agent/{id}");
+    });
 });
 
 describe("pyExtractHttpMethod", () => {
