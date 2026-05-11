@@ -724,9 +724,13 @@ function createJavaParser(): LanguageParser {
 
             // Find the resources base directory
             const resourcesDir = javaFindResourcesDir(rawClientFiles);
+            // Build directory → accessor-name map by scanning public *Client
+            // files for `public XxxClient methodName()` patterns. Falls back to
+            // raw directory names when an accessor can't be resolved.
+            const accessorMap = javaBuildAccessorMap(javaDir);
             const endpoints: EndpointMapping[] = [];
             for (const file of rawClientFiles) {
-                const fileEndpoints = javaExtractEndpoints(file, resourcesDir);
+                const fileEndpoints = javaExtractEndpoints(file, resourcesDir, accessorMap);
                 endpoints.push(...fileEndpoints);
                 console.error(`  ${path.relative(rootDir, file)}: ${fileEndpoints.length} endpoints`);
             }
@@ -743,7 +747,7 @@ function createJavaParser(): LanguageParser {
 
                 const examples: TestExample[] = [];
                 for (const file of wireTests) {
-                    const fileExamples = javaExtractTestExamples(file);
+                    const fileExamples = javaExtractTestExamples(file, rootDir);
                     // Tag each example with its source file name for chain-based matching
                     const fileName = path.basename(file);
                     for (const ex of fileExamples) {
@@ -821,10 +825,52 @@ function javaFindResourcesDir(rawClientFiles: string[]): string {
     return path.dirname(rawClientFiles[0]);
 }
 
-function javaExtractEndpoints(filePath: string, resourcesDir: string): EndpointMapping[] {
+// Scan main client files (excluding Raw*/Async* variants) for accessor methods
+// like `public FhirProviderClient fhirProvider() { ... }`. The return type
+// names a file `XxxClient.java`; the directory containing that file is the
+// resource sub-directory we want to label with the camelCase accessor name
+// rather than the lowercased directory basename. Returns a map from absolute
+// directory path → accessor method name. Empty when no client files exist
+// (e.g. tiny test fixtures); callers must fall back to the directory basename.
+function javaBuildAccessorMap(javaDir: string): Map<string, string> {
+    const map = new Map<string, string>();
+    if (!fs.existsSync(javaDir)) return map;
+
+    const allClientFiles = findFiles(javaDir, /\/\w+Client\.java$/).filter((f) => {
+        const base = path.basename(f);
+        return !base.startsWith("Async") && !base.startsWith("Raw");
+    });
+
+    // Index files by basename for return-type lookup.
+    const filesByBasename = new Map<string, string>();
+    for (const f of allClientFiles) filesByBasename.set(path.basename(f), f);
+
+    for (const clientFile of allClientFiles) {
+        const source = fs.readFileSync(clientFile, "utf-8");
+        // `public XxxClient accessorName() {` — only no-arg, return type ends in "Client".
+        const accessorPattern = /public\s+(\w+Client)\s+(\w+)\s*\(\s*\)\s*\{/g;
+        let match: RegExpExecArray | null;
+        while ((match = accessorPattern.exec(source)) !== null) {
+            const returnType = match[1];
+            const accessorName = match[2];
+            if (returnType.startsWith("Raw") || returnType.startsWith("Async")) continue;
+            const childFile = filesByBasename.get(`${returnType}.java`);
+            if (!childFile || childFile === clientFile) continue;
+            map.set(path.dirname(childFile), accessorName);
+        }
+    }
+
+    return map;
+}
+
+function javaExtractEndpoints(
+    filePath: string,
+    resourcesDir: string,
+    accessorMap?: Map<string, string>,
+): EndpointMapping[] {
     const source = fs.readFileSync(filePath, "utf-8");
     const lines = source.split("\n");
-    const chain = javaDeriveMethodChain(filePath, resourcesDir);
+    const chain = javaDeriveMethodChain(filePath, resourcesDir, accessorMap);
     const endpoints: EndpointMapping[] = [];
 
     // Parse method by method: find public methods with HTTP implementations
@@ -933,14 +979,27 @@ function javaExtractEndpoints(filePath: string, resourcesDir: string): EndpointM
     return endpoints;
 }
 
-function javaDeriveMethodChain(filePath: string, resourcesDir: string): string[] {
+function javaDeriveMethodChain(
+    filePath: string,
+    resourcesDir: string,
+    accessorMap?: Map<string, string>,
+): string[] {
     const relativePath = path.relative(resourcesDir, filePath).replace(/\\/g, "/");
     const parts = relativePath.split("/");
     parts.pop(); // Remove filename
-    return parts;
+    if (!accessorMap || accessorMap.size === 0) return parts;
+    // Walk each directory level from resourcesDir down, remapping each
+    // segment's lowercased basename to its camelCase accessor when known.
+    const chain: string[] = [];
+    let dir = resourcesDir;
+    for (const segment of parts) {
+        dir = path.join(dir, segment);
+        chain.push(accessorMap.get(dir) ?? segment);
+    }
+    return chain;
 }
 
-function javaExtractTestExamples(filePath: string): TestExample[] {
+function javaExtractTestExamples(filePath: string, rootDir?: string): TestExample[] {
     const source = fs.readFileSync(filePath, "utf-8");
     const lines = source.split("\n");
     const examples: TestExample[] = [];
@@ -973,7 +1032,7 @@ function javaExtractTestExamples(filePath: string): TestExample[] {
             if (line.includes("server.enqueue")) {
                 mockResponseCount++;
                 if (mockResponseCount === 2) {
-                    const bodyStr = javaExtractSetBody(lines, j);
+                    const bodyStr = javaExtractSetBody(lines, j, rootDir);
                     if (bodyStr) {
                         try { responseBody = JSON.parse(bodyStr); } catch { responseBody = bodyStr; }
                     }
@@ -986,7 +1045,7 @@ function javaExtractTestExamples(filePath: string): TestExample[] {
 
             // expectedRequestBody string
             if (line.includes("expectedRequestBody") && line.includes("=")) {
-                const bodyStr = javaExtractConcatenatedString(lines, j);
+                const bodyStr = javaExtractConcatenatedString(lines, j, rootDir);
                 if (bodyStr) {
                     try { requestBody = JSON.parse(bodyStr); } catch { /* skip */ }
                 }
@@ -994,7 +1053,7 @@ function javaExtractTestExamples(filePath: string): TestExample[] {
 
             // expectedResponseBody string (more reliable than mock)
             if (line.includes("expectedResponseBody") && line.includes("=")) {
-                const bodyStr = javaExtractConcatenatedString(lines, j);
+                const bodyStr = javaExtractConcatenatedString(lines, j, rootDir);
                 if (bodyStr) {
                     try { responseBody = JSON.parse(bodyStr); } catch { /* keep mock version */ }
                 }
@@ -1062,23 +1121,55 @@ function javaUnescape(s: string): string {
     return out;
 }
 
-function javaExtractSetBody(lines: string[], startLine: number): string | null {
+// Load a classpath resource referenced by `TestResources.loadResource("/path")`.
+// The path is relative to the test resource root (`src/test/resources/`).
+function javaLoadTestResource(rootDir: string, resourcePath: string): string | null {
+    const filePath = path.join(rootDir, "src/test/resources", resourcePath.replace(/^\/+/, ""));
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readFileSync(filePath, "utf-8");
+}
+
+function javaExtractSetBody(lines: string[], startLine: number, rootDir?: string): string | null {
     let combined = "";
-    for (let i = startLine; i < Math.min(startLine + 10, lines.length); i++) {
+    for (let i = startLine; i < Math.min(startLine + 15, lines.length); i++) {
         combined += lines[i];
-        const match = combined.match(/\.setBody\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)/);
-        if (match) {
-            return javaUnescape(match[1]);
+        // .setBody(TestResources.loadResource("/wire-tests/Foo_response.json"))
+        // Resolve to the actual fixture file's contents.
+        if (rootDir) {
+            const loadMatch = combined.match(
+                /\.setBody\s*\(\s*TestResources\.loadResource\s*\(\s*"([^"]+)"\s*\)\s*\)/,
+            );
+            if (loadMatch) {
+                const content = javaLoadTestResource(rootDir, loadMatch[1]);
+                if (content !== null) return content;
+            }
+        }
+        // .setBody("inline JSON string")
+        const literalMatch = combined.match(/\.setBody\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)/);
+        if (literalMatch) {
+            return javaUnescape(literalMatch[1]);
         }
     }
     return null;
 }
 
-function javaExtractConcatenatedString(lines: string[], startLine: number): string | null {
+function javaExtractConcatenatedString(
+    lines: string[],
+    startLine: number,
+    rootDir?: string,
+): string | null {
     let combined = "";
     for (let i = startLine; i < Math.min(startLine + 50, lines.length); i++) {
         combined += lines[i] + "\n";
         if (lines[i].trim().endsWith(";")) break;
+    }
+    // `expected* = TestResources.loadResource("/path")` — load the fixture file.
+    if (rootDir) {
+        const loadMatch = combined.match(/TestResources\.loadResource\s*\(\s*"([^"]+)"\s*\)/);
+        if (loadMatch) {
+            const content = javaLoadTestResource(rootDir, loadMatch[1]);
+            if (content !== null) return content;
+        }
     }
     const parts: string[] = [];
     const stringLiteralPattern = /"((?:[^"\\]|\\.)*)"/g;
@@ -1318,12 +1409,14 @@ export {
     createTypeScriptParser,
     findTemplateMatch,
     isBalancedParens,
+    javaBuildAccessorMap,
     javaCountBraceDelta,
     javaDeriveMethodChain,
     javaExtractConcatenatedString,
     javaExtractEndpoints,
     javaExtractSetBody,
     javaExtractTestExamples,
+    javaLoadTestResource,
     javaUnescape,
     normalizePath,
     normalizePathParams,

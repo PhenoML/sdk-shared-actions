@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "message": "Fhir provider created successfully",
+  "data": {
+    "id": "1716d214-de93-43a4-aa6b-a878d864e2ad",
+    "name": "Epic Sandbox",
+    "provider": "athenahealth"
+  }
+}
