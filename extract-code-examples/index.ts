@@ -25,6 +25,12 @@ interface EndpointMapping {
     httpPath: string; // OpenAPI-style template, e.g., /agent/{id}
     methodChain: string[]; // e.g., ["agent", "create"]
     methodName: string; // e.g., "create"
+    // Python-only: kwarg names that map to body fields (the values of the
+    // raw client's `json={...}` dict). Used to exclude header/query/path
+    // kwargs from derived bodies. Undefined for TS/Java (their parsers
+    // read body directly from a test literal) or when the raw client
+    // doesn't use a `json={...}` dict literal (e.g., `json=body_var`).
+    bodyParamNames?: string[];
 }
 
 interface TestExample {
@@ -556,6 +562,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
         if (currentMethod && /self\._client_wrapper\.httpx_client\.(request|stream)\s*\(/.test(line)) {
             const httpPath = pyExtractRequestPath(lines, i);
             const httpMethod = pyExtractHttpMethod(lines, i);
+            const bodyParamNames = pyExtractBodyParamNames(lines, i);
 
             if (httpPath && httpMethod) {
                 // Also snake_case path-param names (Fern Python paths already
@@ -570,6 +577,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
                         httpPath: normalizedPath,
                         methodChain: [...chain, currentMethod],
                         methodName: currentMethod,
+                        ...(bodyParamNames !== null ? { bodyParamNames } : {}),
                     });
                 }
             }
@@ -615,6 +623,46 @@ function pyExtractHttpMethod(lines: string[], startLine: number): string | null 
         if (match) return match[1];
     }
     return null;
+}
+
+// Scans the raw-client method body for `json={...}` and returns the
+// identifiers that appear as VALUES at the top level of that dict — i.e.
+// the SDK kwarg names that become body fields. Returns null when no
+// `json={` dict literal is found, so callers can fall back to their old
+// heuristic for non-dict bodies (e.g., `json=body_var`).
+function pyExtractBodyParamNames(lines: string[], startLine: number): string[] | null {
+    const block = lines.slice(startLine, startLine + 100).join("\n");
+    const match = block.match(/\bjson\s*=\s*\{/);
+    if (!match) return null;
+    const names: string[] = [];
+    let depth = 0;
+    // Walk from the `{` (last char of the match) to its closing `}`. Only
+    // capture identifiers at depth 1 — sub-dicts and sub-lists are part of
+    // a single body field's value, not separate fields.
+    for (let i = match.index! + match[0].length - 1; i < block.length; i++) {
+        const ch = block[i];
+        if (ch === '"' || ch === "'") {
+            const quote = ch;
+            i++;
+            while (i < block.length) {
+                if (block[i] === "\\") { i += 2; continue; }
+                if (block[i] === quote) break;
+                i++;
+            }
+            continue;
+        }
+        if (ch === "{" || ch === "[" || ch === "(") { depth++; continue; }
+        if (ch === "}" || ch === "]" || ch === ")") {
+            depth--;
+            if (depth === 0) break;
+            continue;
+        }
+        if (depth === 1 && ch === ":") {
+            const tail = block.slice(i + 1).match(/^\s*([a-zA-Z_]\w*)/);
+            if (tail) names.push(tail[1]);
+        }
+    }
+    return names;
 }
 
 function pyExtractTestExamples(
@@ -1380,28 +1428,37 @@ function findTemplateMatch(
     return undefined;
 }
 
-// Imperfect: query/header params can't be distinguished from body params
-// at the call site, so they may leak into the body object. Fern's typical
-// shape (body kwargs in the JSON, headers/query passed separately at the
-// transport layer) means this misclassification is rare in practice.
+// When `endpoint.bodyParamNames` is set (extracted from the raw client's
+// `json={...}` dict), use it as a precise allowlist so header/query/path
+// kwargs are excluded. Otherwise fall back to "everything except path
+// params" — imperfect (header/query kwargs leak into the body) but the
+// best we can do without raw-client info.
 function deriveBodyFromKwargs(
-    httpMethod: string,
-    httpPath: string,
+    endpoint: EndpointMapping,
     sdkCallArgs: unknown[],
 ): unknown | null {
-    if (!["POST", "PUT", "PATCH"].includes(httpMethod)) return null;
-    const pathParams = new Set<string>();
-    for (const match of httpPath.matchAll(/\{(\w+)\}/g)) pathParams.add(match[1]);
+    if (!["POST", "PUT", "PATCH"].includes(endpoint.httpMethod)) return null;
+    const accept = bodyKwargFilter(endpoint);
     const body: Record<string, unknown> = {};
     let count = 0;
     for (const arg of sdkCallArgs) {
         if (!arg || typeof arg !== "object" || !("name" in arg) || !("value" in arg)) continue;
         const { name, value } = arg as { name: unknown; value: unknown };
-        if (typeof name !== "string" || pathParams.has(name)) continue;
+        if (typeof name !== "string" || !accept(name)) continue;
         body[name] = value;
         count++;
     }
     return count > 0 ? body : null;
+}
+
+function bodyKwargFilter(endpoint: EndpointMapping): (name: string) => boolean {
+    if (endpoint.bodyParamNames !== undefined) {
+        const allow = new Set(endpoint.bodyParamNames);
+        return (name) => allow.has(name);
+    }
+    const pathParams = new Set<string>();
+    for (const m of endpoint.httpPath.matchAll(/\{(\w+)\}/g)) pathParams.add(m[1]);
+    return (name) => !pathParams.has(name);
 }
 
 function buildManifest(
@@ -1462,11 +1519,7 @@ function buildManifest(
 
         if (endpoint) {
             const key = `${endpoint.httpMethod} ${endpoint.httpPath}`;
-            const body = example.requestBody ?? deriveBodyFromKwargs(
-                endpoint.httpMethod,
-                endpoint.httpPath,
-                example.sdkCallArgs,
-            );
+            const body = example.requestBody ?? deriveBodyFromKwargs(endpoint, example.sdkCallArgs);
             manifest.examples[key] = {
                 httpMethod: endpoint.httpMethod,
                 httpPath: endpoint.httpPath,
@@ -1605,6 +1658,7 @@ export {
     normalizePath,
     normalizePathParams,
     pyDeriveMethodChain,
+    pyExtractBodyParamNames,
     pyExtractEndpoints,
     pyExtractHttpMethod,
     pyExtractRequestPath,

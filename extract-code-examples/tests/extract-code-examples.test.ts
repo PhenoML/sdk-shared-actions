@@ -17,6 +17,7 @@ import {
     normalizePath,
     normalizePathParams,
     pyDeriveMethodChain,
+    pyExtractBodyParamNames,
     pyExtractHttpMethod,
     pyExtractRequestPath,
     pyParseKwargs,
@@ -378,6 +379,53 @@ describe("pyExtractHttpMethod", () => {
     });
 });
 
+describe("pyExtractBodyParamNames", () => {
+    test("collects identifier values from a multi-line `json={...}` dict", () => {
+        const lines = [
+            "self._client_wrapper.httpx_client.request(",
+            '    "agent/stream-chat",',
+            '    method="POST",',
+            "    json={",
+            '        "message": message,',
+            '        "agent_id": agent_id,',
+            "    },",
+            "    headers={",
+            '        "phenoml-on-behalf-of": str(phenoml_on_behalf_of),',
+            "    },",
+            ")",
+        ];
+        // header identifiers must NOT appear in the result, even though
+        // they look identical syntactically — they live in a sibling
+        // `headers={...}` dict, which the walker exits via depth=0.
+        expect(pyExtractBodyParamNames(lines, 0)).toEqual(["message", "agent_id"]);
+    });
+    test("ignores nested-dict sub-fields (depth > 1)", () => {
+        // Fern's normal shape passes identifier values (`"name": name`),
+        // so we capture from depth 1 only. A nested dict literal at
+        // depth 2 must not leak its identifiers into the body set.
+        const lines = [
+            "self._client_wrapper.httpx_client.request(",
+            "    json={",
+            '        "name": name,',
+            '        "extra": {',
+            '            "key": should_not_appear,',
+            "        },",
+            "    },",
+            ")",
+        ];
+        expect(pyExtractBodyParamNames(lines, 0)).toEqual(["name"]);
+    });
+    test("returns null when no `json={` dict literal is present", () => {
+        // GET endpoints have no `json=` arg; `json=body_var` (non-literal)
+        // also returns null so callers fall back to the old heuristic.
+        expect(pyExtractBodyParamNames(["self._client_wrapper.httpx_client.request(", '    "foo",', ")"], 0)).toBeNull();
+        expect(pyExtractBodyParamNames(["    json=body_var,"], 0)).toBeNull();
+    });
+    test("returns empty list for an empty `json={}`", () => {
+        expect(pyExtractBodyParamNames(["    json={},"], 0)).toEqual([]);
+    });
+});
+
 describe("pyParseKwargs", () => {
     test("parses simple string/number/bool/null kwargs", () => {
         const src = 'client.foo.bar(name="x", count=3, ok=True, missing=None, flag=False)';
@@ -456,31 +504,63 @@ describe("pyParseKwargs", () => {
 });
 
 describe("deriveBodyFromKwargs", () => {
+    function endpoint(over: Partial<{ httpMethod: string; httpPath: string; bodyParamNames?: string[] }>) {
+        return {
+            httpMethod: "POST",
+            httpPath: "/foo",
+            methodChain: ["foo"],
+            methodName: "foo",
+            ...over,
+        };
+    }
+
     test("returns null for methods without bodies", () => {
         const args = [{ name: "id", value: "x" }];
-        expect(deriveBodyFromKwargs("GET", "/agent/{id}", args)).toBeNull();
-        expect(deriveBodyFromKwargs("DELETE", "/agent/{id}", args)).toBeNull();
+        expect(deriveBodyFromKwargs(endpoint({ httpMethod: "GET", httpPath: "/agent/{id}" }), args)).toBeNull();
+        expect(deriveBodyFromKwargs(endpoint({ httpMethod: "DELETE", httpPath: "/agent/{id}" }), args)).toBeNull();
     });
-    test("collects non-path-param kwargs into a body object for POST/PUT/PATCH", () => {
+    test("uses bodyParamNames as a positive allowlist when set, excluding headers/query/path kwargs", () => {
+        // Mirrors the streaming-endpoint shape: a POST with a body kwarg
+        // (`message`) plus a header kwarg (`phenoml_on_behalf_of`). Only
+        // the body kwarg must end up in `request.body`.
+        const args = [
+            { name: "phenoml_on_behalf_of", value: "user@example.com" },
+            { name: "message", value: "hi" },
+            { name: "agent_id", value: "agent-123" },
+        ];
+        const result = deriveBodyFromKwargs(
+            endpoint({ httpPath: "/agent/stream-chat", bodyParamNames: ["message", "agent_id"] }),
+            args,
+        );
+        expect(result).toEqual({ message: "hi", agent_id: "agent-123" });
+    });
+    test("returns null when bodyParamNames is empty (no `json={...}` body)", () => {
+        const args = [{ name: "id", value: "x" }];
+        expect(deriveBodyFromKwargs(endpoint({ bodyParamNames: [] }), args)).toBeNull();
+    });
+    test("falls back to path-param exclusion when bodyParamNames is undefined", () => {
+        // Used for endpoints whose raw client doesn't have a `json={...}`
+        // dict literal (rare in practice). Still leaks header/query kwargs
+        // but is better than emitting null.
         const args = [
             { name: "id", value: "agent-123" },
             { name: "name", value: "new-name" },
             { name: "metadata", value: { key: "v" } },
         ];
-        expect(deriveBodyFromKwargs("PATCH", "/agent/{id}", args)).toEqual({
+        expect(deriveBodyFromKwargs(endpoint({ httpMethod: "PATCH", httpPath: "/agent/{id}" }), args)).toEqual({
             name: "new-name",
             metadata: { key: "v" },
         });
     });
-    test("returns null when every kwarg is a path param", () => {
+    test("returns null when every kwarg is a path param (fallback path)", () => {
         const args = [{ name: "id", value: "x" }];
-        expect(deriveBodyFromKwargs("POST", "/agent/{id}/touch", args)).toBeNull();
+        expect(deriveBodyFromKwargs(endpoint({ httpPath: "/agent/{id}/touch" }), args)).toBeNull();
     });
     test("ignores positional-style args (TS shape) — they aren't kwargs", () => {
         // TS parser emits plain values, not {name, value}. The kwarg-style
         // derivation must skip them so it doesn't misclassify TS bodies.
         const args = [{ some: "object", literal: true }];
-        expect(deriveBodyFromKwargs("POST", "/foo", args)).toBeNull();
+        expect(deriveBodyFromKwargs(endpoint({}), args)).toBeNull();
     });
 });
 
