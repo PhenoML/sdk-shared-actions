@@ -45,6 +45,9 @@ const metadata = readJson(metadataPath);
 const originCommit = metadata.originGitCommit;
 const specVersion = spec?.info?.version;
 
+if (!originCommit) {
+    fail(`${metadataPath} has no originGitCommit field.`);
+}
 if (!specVersion) {
     fail(`${specPath} has no info.version field.`);
 }
