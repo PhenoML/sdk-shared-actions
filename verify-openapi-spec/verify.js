@@ -23,21 +23,31 @@ function fail(message) {
     process.exit(1);
 }
 
-if (!fs.existsSync(specPath)) {
-    fail(`${specPath} missing; bundle-openapi-spec workflow may not have run.`);
+function readJson(filePath, missingHint) {
+    let raw;
+    try {
+        raw = fs.readFileSync(filePath, "utf8");
+    } catch (err) {
+        if (err.code === "ENOENT") {
+            fail(`${filePath} missing${missingHint ? `; ${missingHint}` : ""}.`);
+        }
+        fail(`${filePath} could not be read: ${err.message}`);
+    }
+    try {
+        return JSON.parse(raw);
+    } catch (err) {
+        fail(`${filePath} is not valid JSON: ${err.message}`);
+    }
 }
 
-let spec;
-try {
-    spec = JSON.parse(fs.readFileSync(specPath, "utf8"));
-} catch (err) {
-    fail(`${specPath} is not valid JSON: ${err.message}`);
-}
-
-const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+const spec = readJson(specPath, "bundle-openapi-spec workflow may not have run");
+const metadata = readJson(metadataPath);
 const originCommit = metadata.originGitCommit;
 const specVersion = spec?.info?.version;
 
+if (!specVersion) {
+    fail(`${specPath} has no info.version field.`);
+}
 if (specVersion !== originCommit) {
     fail(
         `Bundled spec version ${specVersion} does not match originGitCommit ${originCommit}.`,
