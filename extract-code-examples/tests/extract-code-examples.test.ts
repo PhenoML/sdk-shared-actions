@@ -18,6 +18,7 @@ import {
     pyDeriveMethodChain,
     pyExtractHttpMethod,
     pyExtractRequestPath,
+    truncateAfterMatchingParen,
 } from "../index";
 
 const FIXTURES = path.join(import.meta.dir, "fixtures");
@@ -85,6 +86,27 @@ describe("isBalancedParens", () => {
     test("unbalanced", () => {
         expect(isBalancedParens("f(a, b")).toBe(false);
         expect(isBalancedParens(")(")).toBe(false);
+    });
+});
+
+describe("truncateAfterMatchingParen", () => {
+    test("drops trailing `:` from a `for _ in ...:` wrapper", () => {
+        const input = 'client.agent.stream_chat(\n    agent_id="agent-123",\n):';
+        expect(truncateAfterMatchingParen(input)).toBe(
+            'client.agent.stream_chat(\n    agent_id="agent-123",\n)',
+        );
+    });
+    test("respects nested parens before the outer close", () => {
+        const input = "client.foo.bar(\n    items=(1, 2, 3),\n):";
+        expect(truncateAfterMatchingParen(input)).toBe(
+            "client.foo.bar(\n    items=(1, 2, 3),\n)",
+        );
+    });
+    test("is a no-op when the string already ends at the matching paren", () => {
+        expect(truncateAfterMatchingParen("client.foo.bar()")).toBe("client.foo.bar()");
+    });
+    test("returns the input unchanged when no parens are present", () => {
+        expect(truncateAfterMatchingParen("no parens here")).toBe("no parens here");
     });
 });
 
@@ -421,6 +443,18 @@ describe("Python parser (Authtoken auth fixture)", () => {
         expect(longBody).toBeDefined();
         // Both test files should yield an example (no truncation drops one).
         expect(examples.filter((e) => e.httpPath === "/v2/auth/token").length).toBe(2);
+    });
+
+    test("parseTestExamples strips the `for _ in ...:` wrapper from streaming tests", () => {
+        // Fern's Python generator wraps streaming calls in
+        // `for _ in client.foo(...): pass`. The captured sdkCallSource must
+        // be just the call expression — no `for` prefix, no trailing `:`.
+        const stream = examples.find((e) => e.sdkCallSource.includes("stream_chat"));
+        expect(stream).toBeDefined();
+        expect(stream!.sdkCallSource.startsWith("client.agent.stream_chat(")).toBe(true);
+        expect(stream!.sdkCallSource.endsWith(")")).toBe(true);
+        expect(stream!.sdkCallSource).not.toContain("for _ in");
+        expect(stream!.sdkCallSource).not.toContain("):");
     });
 });
 

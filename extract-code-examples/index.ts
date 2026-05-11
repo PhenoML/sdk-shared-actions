@@ -662,7 +662,7 @@ function pyExtractTestExamples(
                         if (isBalancedParens(sdkCallSource)) break;
                     }
                 }
-                sdkCallSource = sdkCallSource.trim();
+                sdkCallSource = truncateAfterMatchingParen(sdkCallSource).trim();
             }
         }
 
@@ -1191,6 +1191,20 @@ function isBalancedParens(str: string): boolean {
     return depth === 0;
 }
 
+// Naive about strings/comments — same trade-off as isBalancedParens, which
+// is fine for Fern-generated test bodies (no parens-in-strings in args).
+// Drops trailing punctuation when the SDK call appears in a compound
+// statement like `for _ in client.foo(...):` — the regex captures the `:`
+// from the `for` header along with the call.
+function truncateAfterMatchingParen(s: string): string {
+    let depth = 0;
+    for (let i = 0; i < s.length; i++) {
+        if (s[i] === "(") depth++;
+        else if (s[i] === ")" && --depth === 0) return s.slice(0, i + 1);
+    }
+    return s;
+}
+
 // True if `concretePath` matches `templatePath` segment-by-segment, treating
 // any "{name}" segment in the template as a wildcard. e.g. "/agent/{id}"
 // matches "/agent/abc123".
@@ -1420,6 +1434,7 @@ export {
     pyExtractHttpMethod,
     pyExtractRequestPath,
     pyExtractTestExamples,
+    truncateAfterMatchingParen,
     tsExtractEndpoints,
     tsExtractTestExamples,
 };
