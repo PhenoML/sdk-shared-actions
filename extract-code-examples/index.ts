@@ -825,9 +825,12 @@ function javaFindResourcesDir(rawClientFiles: string[]): string {
 // Maps each resource sub-directory to the camelCase accessor that exposes it.
 // Built from `public XxxClient accessorName()` patterns in the main *Client
 // files (the lowercased directory name is not a valid Java accessor — e.g.
-// the `fhirprovider` directory is reached via `fhirProvider()`). Empty when
-// no client files exist (tiny test fixtures); callers fall back to the
-// directory basename.
+// the `fhirprovider` directory is reached via `fhirProvider()`). Each return
+// type is resolved to a file path via the accessor file's `package` and
+// `import` statements rather than a repo-wide basename lookup, so duplicate
+// class names in different packages (e.g. a nested `tools/ToolsClient.java`
+// alongside the top-level one) don't collide. Empty when no client files
+// exist (tiny test fixtures); callers fall back to the directory basename.
 function javaBuildAccessorMap(javaDir: string): Map<string, string> {
     const map = new Map<string, string>();
     const allClientFiles = findFiles(javaDir, /\/\w+Client\.java$/).filter((f) => {
@@ -835,19 +838,30 @@ function javaBuildAccessorMap(javaDir: string): Map<string, string> {
         return !base.startsWith("Async") && !base.startsWith("Raw");
     });
 
-    const filesByBasename = new Map<string, string>();
-    for (const f of allClientFiles) filesByBasename.set(path.basename(f), f);
-
     for (const clientFile of allClientFiles) {
         const source = fs.readFileSync(clientFile, "utf-8");
+        const pkg = source.match(/^\s*package\s+([\w.]+)\s*;/m)?.[1];
+        if (!pkg) continue;
+        const imports = new Map<string, string>();
+        const importPattern = /^\s*import\s+(?:static\s+)?([\w.]+)\s*;/gm;
+        let imp: RegExpExecArray | null;
+        while ((imp = importPattern.exec(source)) !== null) {
+            const fqn = imp[1];
+            const shortName = fqn.split(".").pop();
+            if (shortName && shortName !== "*") imports.set(shortName, fqn);
+        }
+
         const accessorPattern = /public\s+(\w+Client)\s+(\w+)\s*\(\s*\)\s*\{/g;
         let match: RegExpExecArray | null;
         while ((match = accessorPattern.exec(source)) !== null) {
             const returnType = match[1];
             const accessorName = match[2];
             if (returnType.startsWith("Raw") || returnType.startsWith("Async")) continue;
-            const childFile = filesByBasename.get(`${returnType}.java`);
-            if (!childFile || childFile === clientFile) continue;
+            // Resolve via imports first; fall back to the accessor file's own package.
+            const fqn = imports.get(returnType) ?? `${pkg}.${returnType}`;
+            const childFile = path.join(javaDir, fqn.replace(/\./g, "/") + ".java");
+            if (childFile === clientFile) continue;
+            if (!fs.existsSync(childFile)) continue;
             map.set(path.dirname(childFile), accessorName);
         }
     }

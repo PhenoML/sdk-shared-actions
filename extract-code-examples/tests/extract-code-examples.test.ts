@@ -233,6 +233,18 @@ describe("javaBuildAccessorMap", () => {
     test("returns an empty map when the source directory is missing", () => {
         expect(javaBuildAccessorMap(path.join(root, "does/not/exist")).size).toBe(0);
     });
+
+    test("distinguishes duplicate Client basenames via package + imports", () => {
+        // The fixture has two `ToolsClient.java` files: the top-level one at
+        // resources/tools/, and a nested one at resources/tools/mcpserver/tools/.
+        // A basename-only index would collapse to one map entry and leave the
+        // other directory unmapped.
+        const map = javaBuildAccessorMap(javaDir);
+        expect(map.get(path.join(javaDir, "com/phenoml/api/resources/tools"))).toBe("tools");
+        expect(
+            map.get(path.join(javaDir, "com/phenoml/api/resources/tools/mcpserver/tools")),
+        ).toBe("tools");
+    });
 });
 
 describe("javaDeriveMethodChain", () => {
