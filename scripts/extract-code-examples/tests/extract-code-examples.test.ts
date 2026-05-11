@@ -16,7 +16,7 @@ import {
     pyDeriveMethodChain,
     pyExtractHttpMethod,
     pyExtractRequestPath,
-} from "../extract-code-examples";
+} from "../index";
 
 const FIXTURES = path.join(import.meta.dir, "fixtures");
 
