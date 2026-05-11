@@ -12,7 +12,6 @@ import {
     javaDeriveMethodChain,
     javaExtractConcatenatedString,
     javaExtractSetBody,
-    javaLoadTestResource,
     javaUnescape,
     normalizePath,
     normalizePathParams,
@@ -172,9 +171,6 @@ describe("javaExtractSetBody", () => {
     });
 
     test("resolves setBody(TestResources.loadResource(...)) to fixture file contents", () => {
-        // The java-accessor fixture's wire test uses `setBody(TestResources.loadResource(
-        // "/wire-tests/FhirProviderWireTest_testCreate_response.json"))`, and the
-        // corresponding fixture file ships under src/test/resources/wire-tests/.
         const root = path.join(FIXTURES, "java-accessor");
         const lines = [
             "server.enqueue(new MockResponse()",
@@ -183,13 +179,10 @@ describe("javaExtractSetBody", () => {
         ];
         const body = javaExtractSetBody(lines, 0, root);
         expect(body).not.toBeNull();
-        const parsed = JSON.parse(body!);
-        expect(parsed).toMatchObject({ success: true });
+        expect(JSON.parse(body!)).toMatchObject({ success: true });
     });
 
     test("returns null without rootDir when only TestResources.loadResource is present", () => {
-        // Backwards-compatible: when called without rootDir we still fall back
-        // to literal-string extraction and ignore unresolved loadResource calls.
         const lines = [
             "server.enqueue(new MockResponse()",
             '    .setBody(TestResources.loadResource("/wire-tests/whatever.json")));',
@@ -218,50 +211,27 @@ describe("javaExtractConcatenatedString", () => {
         ];
         const body = javaExtractConcatenatedString(lines, 0, root);
         expect(body).not.toBeNull();
-        const parsed = JSON.parse(body!);
-        expect(parsed).toMatchObject({ success: true });
-    });
-});
-
-describe("javaLoadTestResource", () => {
-    test("loads a classpath-style /wire-tests/*.json fixture", () => {
-        const root = path.join(FIXTURES, "java-accessor");
-        const content = javaLoadTestResource(
-            root,
-            "/wire-tests/FhirProviderWireTest_testCreate_response.json",
-        );
-        expect(content).not.toBeNull();
-        expect(JSON.parse(content!)).toMatchObject({ message: "Fhir provider created successfully" });
-    });
-
-    test("returns null for missing resources rather than throwing", () => {
-        const root = path.join(FIXTURES, "java-accessor");
-        expect(javaLoadTestResource(root, "/wire-tests/does-not-exist.json")).toBeNull();
+        expect(JSON.parse(body!)).toMatchObject({ success: true });
     });
 });
 
 describe("javaBuildAccessorMap", () => {
+    const root = path.join(FIXTURES, "java-accessor");
+    const javaDir = path.join(root, "src/main/java");
+
     test("maps directory paths to camelCase accessor method names", () => {
-        const root = path.join(FIXTURES, "java-accessor");
-        const javaDir = path.join(root, "src/main/java");
         const map = javaBuildAccessorMap(javaDir);
-        // PhenomlClient declares `public FhirProviderClient fhirProvider()`,
-        // so the `fhirprovider` directory should remap to `fhirProvider`.
         expect(map.get(path.join(javaDir, "com/phenoml/api/resources/fhirprovider"))).toBe(
             "fhirProvider",
         );
-        // ToolsClient declares `public McpServerClient mcpServer()`, mapping
-        // the `tools/mcpserver` directory to the `mcpServer` accessor.
         expect(map.get(path.join(javaDir, "com/phenoml/api/resources/tools/mcpserver"))).toBe(
             "mcpServer",
         );
-        // The `tools` directory is reachable via `public ToolsClient tools()`.
         expect(map.get(path.join(javaDir, "com/phenoml/api/resources/tools"))).toBe("tools");
     });
 
     test("returns an empty map when the source directory is missing", () => {
-        const map = javaBuildAccessorMap(path.join(FIXTURES, "java-accessor", "does/not/exist"));
-        expect(map.size).toBe(0);
+        expect(javaBuildAccessorMap(path.join(root, "does/not/exist")).size).toBe(0);
     });
 });
 
@@ -275,9 +245,6 @@ describe("javaDeriveMethodChain", () => {
     });
 
     test("remaps lowercased directory segments to camelCase accessor names via the map", () => {
-        // Without the accessor map this would return ["fhirprovider"], breaking
-        // any consumer that tried to reconstruct `client.fhirprovider()` (which
-        // doesn't exist on the Java SDK — the accessor is `fhirProvider()`).
         const resourcesDir = "/sdk/src/main/java/com/phenoml/api/resources";
         const accessorMap = new Map<string, string>([
             [`${resourcesDir}/fhirprovider`, "fhirProvider"],
@@ -290,10 +257,8 @@ describe("javaDeriveMethodChain", () => {
         expect(chain).toEqual(["fhirProvider"]);
     });
 
-    test("remaps nested segments independently", () => {
+    test("remaps nested segments independently, leaving already-matching segments alone", () => {
         const resourcesDir = "/sdk/src/main/java/com/phenoml/api/resources";
-        // Only the inner `mcpserver` segment differs from its accessor; the
-        // outer `tools` segment already matches its accessor name.
         const accessorMap = new Map<string, string>([
             [`${resourcesDir}/tools`, "tools"],
             [`${resourcesDir}/tools/mcpserver`, "mcpServer"],
@@ -308,7 +273,6 @@ describe("javaDeriveMethodChain", () => {
 
     test("falls back to the lowercased directory name when no accessor is registered", () => {
         const resourcesDir = "/sdk/src/main/java/com/phenoml/api/resources";
-        // Empty map → fully falls back to legacy directory-name behavior.
         const chain = javaDeriveMethodChain(
             `${resourcesDir}/authtoken/auth/RawAuthClient.java`,
             resourcesDir,
@@ -486,26 +450,18 @@ describe("Java parser (accessor-map fixture)", () => {
     const examples = parser.parseTestExamples(root);
 
     test("emits camelCase accessor names in sdkMethodChain instead of lowercased dir names", () => {
-        // PhenomlClient.fhirProvider() — directory is `fhirprovider`, but
-        // before this fix the chain was ["fhirprovider", "create"], which
-        // doesn't compile against the real Java SDK.
         const create = endpoints.find((e) => e.methodName === "create" && e.httpPath === "/fhir-provider");
         expect(create).toBeDefined();
         expect(create!.methodChain).toEqual(["fhirProvider", "create"]);
     });
 
     test("emits camelCase accessor names for nested resources", () => {
-        // tools/mcpserver — outer accessor `tools()` matches the dir name,
-        // inner accessor `mcpServer()` differs from the `mcpserver` dir.
         const create = endpoints.find((e) => e.methodName === "create" && e.httpPath === "/tools/mcp-server");
         expect(create).toBeDefined();
         expect(create!.methodChain).toEqual(["tools", "mcpServer", "create"]);
     });
 
     test("loads TestResources.loadResource() fixture contents into the response body", () => {
-        // The wire test sets the response body via TestResources.loadResource;
-        // before this fix that body came out as null because the parser only
-        // matched string literals.
         const ex = examples.find((e) => e.methodName === "create");
         expect(ex).toBeDefined();
         expect(ex!.responseBody).toMatchObject({

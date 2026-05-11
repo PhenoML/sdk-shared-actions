@@ -724,9 +724,6 @@ function createJavaParser(): LanguageParser {
 
             // Find the resources base directory
             const resourcesDir = javaFindResourcesDir(rawClientFiles);
-            // Build directory → accessor-name map by scanning public *Client
-            // files for `public XxxClient methodName()` patterns. Falls back to
-            // raw directory names when an accessor can't be resolved.
             const accessorMap = javaBuildAccessorMap(javaDir);
             const endpoints: EndpointMapping[] = [];
             for (const file of rawClientFiles) {
@@ -825,29 +822,24 @@ function javaFindResourcesDir(rawClientFiles: string[]): string {
     return path.dirname(rawClientFiles[0]);
 }
 
-// Scan main client files (excluding Raw*/Async* variants) for accessor methods
-// like `public FhirProviderClient fhirProvider() { ... }`. The return type
-// names a file `XxxClient.java`; the directory containing that file is the
-// resource sub-directory we want to label with the camelCase accessor name
-// rather than the lowercased directory basename. Returns a map from absolute
-// directory path → accessor method name. Empty when no client files exist
-// (e.g. tiny test fixtures); callers must fall back to the directory basename.
+// Maps each resource sub-directory to the camelCase accessor that exposes it.
+// Built from `public XxxClient accessorName()` patterns in the main *Client
+// files (the lowercased directory name is not a valid Java accessor — e.g.
+// the `fhirprovider` directory is reached via `fhirProvider()`). Empty when
+// no client files exist (tiny test fixtures); callers fall back to the
+// directory basename.
 function javaBuildAccessorMap(javaDir: string): Map<string, string> {
     const map = new Map<string, string>();
-    if (!fs.existsSync(javaDir)) return map;
-
     const allClientFiles = findFiles(javaDir, /\/\w+Client\.java$/).filter((f) => {
         const base = path.basename(f);
         return !base.startsWith("Async") && !base.startsWith("Raw");
     });
 
-    // Index files by basename for return-type lookup.
     const filesByBasename = new Map<string, string>();
     for (const f of allClientFiles) filesByBasename.set(path.basename(f), f);
 
     for (const clientFile of allClientFiles) {
         const source = fs.readFileSync(clientFile, "utf-8");
-        // `public XxxClient accessorName() {` — only no-arg, return type ends in "Client".
         const accessorPattern = /public\s+(\w+Client)\s+(\w+)\s*\(\s*\)\s*\{/g;
         let match: RegExpExecArray | null;
         while ((match = accessorPattern.exec(source)) !== null) {
@@ -1121,34 +1113,30 @@ function javaUnescape(s: string): string {
     return out;
 }
 
-// Load a classpath resource referenced by `TestResources.loadResource("/path")`.
-// The path is relative to the test resource root (`src/test/resources/`).
-function javaLoadTestResource(rootDir: string, resourcePath: string): string | null {
-    const filePath = path.join(rootDir, "src/test/resources", resourcePath.replace(/^\/+/, ""));
-    if (!fs.existsSync(filePath)) return null;
-    return fs.readFileSync(filePath, "utf-8");
+// Resolve any `TestResources.loadResource("/path")` call found in `combined`
+// to the contents of the fixture file under `src/test/resources/`. The leading
+// slash on the resource path is the classpath convention. Returns null when
+// no such call is present or the file can't be read.
+function javaTryLoadResource(combined: string, rootDir: string | undefined): string | null {
+    if (!rootDir) return null;
+    const match = combined.match(/TestResources\.loadResource\s*\(\s*"([^"]+)"\s*\)/);
+    if (!match) return null;
+    const filePath = path.join(rootDir, "src/test/resources", match[1].replace(/^\/+/, ""));
+    try {
+        return fs.readFileSync(filePath, "utf-8");
+    } catch {
+        return null;
+    }
 }
 
 function javaExtractSetBody(lines: string[], startLine: number, rootDir?: string): string | null {
     let combined = "";
     for (let i = startLine; i < Math.min(startLine + 15, lines.length); i++) {
         combined += lines[i];
-        // .setBody(TestResources.loadResource("/wire-tests/Foo_response.json"))
-        // Resolve to the actual fixture file's contents.
-        if (rootDir) {
-            const loadMatch = combined.match(
-                /\.setBody\s*\(\s*TestResources\.loadResource\s*\(\s*"([^"]+)"\s*\)\s*\)/,
-            );
-            if (loadMatch) {
-                const content = javaLoadTestResource(rootDir, loadMatch[1]);
-                if (content !== null) return content;
-            }
-        }
-        // .setBody("inline JSON string")
+        const loaded = javaTryLoadResource(combined, rootDir);
+        if (loaded !== null) return loaded;
         const literalMatch = combined.match(/\.setBody\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)/);
-        if (literalMatch) {
-            return javaUnescape(literalMatch[1]);
-        }
+        if (literalMatch) return javaUnescape(literalMatch[1]);
     }
     return null;
 }
@@ -1163,14 +1151,8 @@ function javaExtractConcatenatedString(
         combined += lines[i] + "\n";
         if (lines[i].trim().endsWith(";")) break;
     }
-    // `expected* = TestResources.loadResource("/path")` — load the fixture file.
-    if (rootDir) {
-        const loadMatch = combined.match(/TestResources\.loadResource\s*\(\s*"([^"]+)"\s*\)/);
-        if (loadMatch) {
-            const content = javaLoadTestResource(rootDir, loadMatch[1]);
-            if (content !== null) return content;
-        }
-    }
+    const loaded = javaTryLoadResource(combined, rootDir);
+    if (loaded !== null) return loaded;
     const parts: string[] = [];
     const stringLiteralPattern = /"((?:[^"\\]|\\.)*)"/g;
     let m;
@@ -1416,7 +1398,6 @@ export {
     javaExtractEndpoints,
     javaExtractSetBody,
     javaExtractTestExamples,
-    javaLoadTestResource,
     javaUnescape,
     normalizePath,
     normalizePathParams,
