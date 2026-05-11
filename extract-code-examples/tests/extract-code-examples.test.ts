@@ -6,6 +6,7 @@ import {
     createJavaParser,
     createPythonParser,
     createTypeScriptParser,
+    deriveBodyFromKwargs,
     isBalancedParens,
     javaBuildAccessorMap,
     javaCountBraceDelta,
@@ -18,6 +19,7 @@ import {
     pyDeriveMethodChain,
     pyExtractHttpMethod,
     pyExtractRequestPath,
+    pyParseKwargs,
     truncateAfterMatchingParen,
 } from "../index";
 
@@ -376,6 +378,86 @@ describe("pyExtractHttpMethod", () => {
     });
 });
 
+describe("pyParseKwargs", () => {
+    test("parses simple string/number/bool/null kwargs", () => {
+        const src = 'client.foo.bar(name="x", count=3, ok=True, missing=None, flag=False)';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "name", value: "x" },
+            { name: "count", value: 3 },
+            { name: "ok", value: true },
+            { name: "missing", value: null },
+            { name: "flag", value: false },
+        ]);
+    });
+    test("parses list and dict values, including nested commas", () => {
+        const src = 'client.foo.bar(items=[1, 2, 3], meta={"a": 1, "b": [4, 5]})';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "items", value: [1, 2, 3] },
+            { name: "meta", value: { a: 1, b: [4, 5] } },
+        ]);
+    });
+    test("preserves commas inside string literals", () => {
+        const src = 'client.foo.bar(label="a, b, c", count=1)';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "label", value: "a, b, c" },
+            { name: "count", value: 1 },
+        ]);
+    });
+    test("falls back to <expr:...> for non-literal values", () => {
+        const src = "client.foo.bar(when=datetime.now(), id=SomeEnum.A)";
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "when", value: "<expr:datetime.now()>" },
+            { name: "id", value: "<expr:SomeEnum.A>" },
+        ]);
+    });
+    test("returns empty list for a call with no args", () => {
+        expect(pyParseKwargs("client.foo.bar()")).toEqual([]);
+    });
+    test("handles multi-line kwargs (Fern's default formatting)", () => {
+        const src = [
+            "client.agent.create(",
+            '    name="name",',
+            '    prompts=["a", "b"],',
+            '    provider="provider",',
+            ")",
+        ].join("\n");
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "name", value: "name" },
+            { name: "prompts", value: ["a", "b"] },
+            { name: "provider", value: "provider" },
+        ]);
+    });
+});
+
+describe("deriveBodyFromKwargs", () => {
+    test("returns null for methods without bodies", () => {
+        const args = [{ name: "id", value: "x" }];
+        expect(deriveBodyFromKwargs("GET", "/agent/{id}", args)).toBeNull();
+        expect(deriveBodyFromKwargs("DELETE", "/agent/{id}", args)).toBeNull();
+    });
+    test("collects non-path-param kwargs into a body object for POST/PUT/PATCH", () => {
+        const args = [
+            { name: "id", value: "agent-123" },
+            { name: "name", value: "new-name" },
+            { name: "metadata", value: { key: "v" } },
+        ];
+        expect(deriveBodyFromKwargs("PATCH", "/agent/{id}", args)).toEqual({
+            name: "new-name",
+            metadata: { key: "v" },
+        });
+    });
+    test("returns null when every kwarg is a path param", () => {
+        const args = [{ name: "id", value: "x" }];
+        expect(deriveBodyFromKwargs("POST", "/agent/{id}/touch", args)).toBeNull();
+    });
+    test("ignores positional-style args (TS shape) — they aren't kwargs", () => {
+        // TS parser emits plain values, not {name, value}. The kwarg-style
+        // derivation must skip them so it doesn't misclassify TS bodies.
+        const args = [{ some: "object", literal: true }];
+        expect(deriveBodyFromKwargs("POST", "/foo", args)).toBeNull();
+    });
+});
+
 // ============================================================
 // End-to-end parser tests against real SDK fixtures
 // ============================================================
@@ -409,6 +491,22 @@ describe("TypeScript parser (Summary client fixture)", () => {
         // be extracted.
         expect(examples).toHaveLength(6);
         expect(examples.every((e) => e.httpMethod && e.httpPath)).toBe(true);
+    });
+
+    test("parseTestExamples populates requestBody from rawRequestBody literal", () => {
+        // The TS parser reads a `const rawRequestBody = {...}` literal from
+        // the wire test directly. createTemplate's (1) variant assigns one,
+        // so requestBody must be the parsed object (not null).
+        const createTemplate = examples.find((e) => e.httpMethod === "POST" && e.httpPath === "/fhir2summary/template");
+        expect(createTemplate).toBeDefined();
+        expect(createTemplate!.requestBody).toEqual({
+            name: "name",
+            example_summary: "Patient John Doe, age 45, presents with hypertension diagnosed on 2024-01-15.",
+            target_resources: ["Patient", "Condition", "Observation"],
+            mode: "mode",
+        });
+        // The SDK call's single object arg also flows into sdkCallArgs.
+        expect(createTemplate!.sdkCallArgs).toHaveLength(1);
     });
 });
 
@@ -472,6 +570,40 @@ describe("Python parser (Authtoken auth fixture)", () => {
         expect(stream!.sdkCallSource.endsWith(")")).toBe(true);
         expect(stream!.sdkCallSource).not.toContain("for _ in");
         expect(stream!.sdkCallSource).not.toContain("):");
+    });
+
+    test("parseTestExamples populates sdkCallArgs from the SDK call kwargs", () => {
+        // The auth fixture's get_token call passes three kwargs; they
+        // must round-trip into sdkCallArgs as {name, value} pairs.
+        const withArgs = examples.find((e) => e.sdkCallArgs.length > 0 && e.httpPath === "/v2/auth/token");
+        expect(withArgs).toBeDefined();
+        expect(withArgs!.sdkCallArgs).toEqual([
+            { name: "grant_type", value: "client_credentials" },
+            { name: "client_id", value: "my-client" },
+            { name: "client_secret", value: "my-secret" },
+        ]);
+    });
+
+    test("buildManifest derives request.body from kwargs for POST endpoints", () => {
+        // End-to-end: the Python parser doesn't capture body literals from
+        // tests, so buildManifest must derive `body` from sdkCallArgs.
+        // Filter to the kwarg-bearing example because the fixture also
+        // contains a no-args call for the same endpoint (long-body test)
+        // which would otherwise overwrite the kwarg one in the manifest.
+        const metadata = {
+            generatorName: "fernapi/fern-python-sdk",
+            sdkVersion: "0.0.0",
+            originGitCommit: "deadbeef",
+        };
+        const withKwargs = examples.filter((e) => e.sdkCallArgs.length > 0);
+        const manifest = buildManifest(endpoints, withKwargs, "python", "pkg", metadata);
+        const entry = manifest.examples["POST /v2/auth/token"];
+        expect(entry).toBeDefined();
+        expect(entry.request.body).toEqual({
+            grant_type: "client_credentials",
+            client_id: "my-client",
+            client_secret: "my-secret",
+        });
     });
 });
 

@@ -693,15 +693,156 @@ function pyExtractTestExamples(
                 httpPath,
                 methodName,
                 describeBlock: "",
+                // requestBody is derived from kwargs in buildManifest where
+                // the path template (and therefore path-param names) is known.
                 requestBody: null,
                 responseBody,
-                sdkCallArgs: [],
+                sdkCallArgs: sdkCallSource ? pyParseKwargs(sdkCallSource) : [],
                 sdkCallSource,
             });
         }
     }
 
     return examples;
+}
+
+// Parses kwargs out of a captured Python SDK call source like
+// `client.foo.bar(name="x", items=[1, 2])`. Returns `{name, value}` pairs in
+// call order. Values are JSON-parsed after translating Python's True/False/None
+// to their JSON equivalents; anything that can't be parsed comes back as a
+// raw `<expr:...>` string (matching the TS parser's escape hatch).
+//
+// Hand-rolled because Node has no Python AST. Naive about exotic Python
+// (single-quoted strings work, but f-strings, triple-quoted strings, and
+// concatenated literals aren't handled) — fine for Fern-generated test
+// bodies, which only ever use plain literal kwargs.
+function pyParseKwargs(callSource: string): Array<{ name: string; value: unknown }> {
+    const portion = pyExtractArgsPortion(callSource);
+    if (portion === null) return [];
+    const out: Array<{ name: string; value: unknown }> = [];
+    for (const piece of pySplitTopLevel(portion)) {
+        const eq = pyFindTopLevelEquals(piece);
+        if (eq < 0) continue; // positional arg — Fern tests don't use these
+        const name = piece.slice(0, eq).trim();
+        if (!/^\w+$/.test(name)) continue;
+        out.push({ name, value: pyParseValue(piece.slice(eq + 1)) });
+    }
+    return out;
+}
+
+// Returns the substring between the outermost `(...)` of `callSource`, or
+// null if no balanced pair is found. String-literal aware so parens inside
+// quoted strings don't shift depth.
+function pyExtractArgsPortion(callSource: string): string | null {
+    const open = callSource.indexOf("(");
+    if (open < 0) return null;
+    let depth = 0;
+    let inString = false;
+    let quote = "";
+    for (let i = open; i < callSource.length; i++) {
+        const ch = callSource[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < callSource.length) { i++; continue; }
+            if (ch === quote) inString = false;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; continue; }
+        if (ch === "(") depth++;
+        else if (ch === ")") {
+            depth--;
+            if (depth === 0) return callSource.slice(open + 1, i);
+        }
+    }
+    return null;
+}
+
+// Splits at top-level commas, respecting nested (), [], {} and string literals.
+function pySplitTopLevel(s: string): string[] {
+    const out: string[] = [];
+    let depth = 0;
+    let inString = false;
+    let quote = "";
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < s.length) { i++; continue; }
+            if (ch === quote) inString = false;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; continue; }
+        if (ch === "(" || ch === "[" || ch === "{") depth++;
+        else if (ch === ")" || ch === "]" || ch === "}") depth--;
+        else if (ch === "," && depth === 0) {
+            const part = s.slice(start, i).trim();
+            if (part) out.push(part);
+            start = i + 1;
+        }
+    }
+    const tail = s.slice(start).trim();
+    if (tail) out.push(tail);
+    return out;
+}
+
+// Returns the index of the first top-level `=` that is an assignment
+// (skipping `==`), or -1 if none. Respects nesting and string literals.
+function pyFindTopLevelEquals(s: string): number {
+    let depth = 0;
+    let inString = false;
+    let quote = "";
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < s.length) { i++; continue; }
+            if (ch === quote) inString = false;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; continue; }
+        if (ch === "(" || ch === "[" || ch === "{") depth++;
+        else if (ch === ")" || ch === "]" || ch === "}") depth--;
+        else if (ch === "=" && depth === 0 && s[i + 1] !== "=") return i;
+    }
+    return -1;
+}
+
+function pyParseValue(s: string): unknown {
+    const trimmed = s.trim();
+    if (!trimmed) return undefined;
+    try {
+        return JSON.parse(pyToJsonLiteral(trimmed));
+    } catch {
+        return `<expr:${trimmed}>`;
+    }
+}
+
+// Translates bare Python True/False/None to true/false/null so JSON.parse
+// can read the result. Skips matches inside string literals and matches
+// adjacent to word characters (e.g. `TrueOrFalse` is left alone).
+function pyToJsonLiteral(s: string): string {
+    let out = "";
+    let inString = false;
+    let quote = "";
+    let i = 0;
+    while (i < s.length) {
+        const ch = s[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < s.length) { out += ch + s[i + 1]; i += 2; continue; }
+            if (ch === quote) inString = false;
+            out += ch;
+            i++;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; out += ch; i++; continue; }
+        const prev = i > 0 ? s[i - 1] : "";
+        if (!/\w/.test(prev)) {
+            if (s.startsWith("True", i) && !/\w/.test(s[i + 4] ?? "")) { out += "true"; i += 4; continue; }
+            if (s.startsWith("False", i) && !/\w/.test(s[i + 5] ?? "")) { out += "false"; i += 5; continue; }
+            if (s.startsWith("None", i) && !/\w/.test(s[i + 4] ?? "")) { out += "null"; i += 4; continue; }
+        }
+        out += ch;
+        i++;
+    }
+    return out;
 }
 
 // ============================================================
@@ -1237,6 +1378,36 @@ function findTemplateMatch(
     return undefined;
 }
 
+// Fallback for languages whose test-bodies don't include an explicit
+// request-body literal (Python kwargs-style). Builds a body object from
+// kwarg-shaped sdkCallArgs, excluding any kwarg whose name appears as a
+// `{name}` slot in the path template. Returns null for methods that don't
+// carry a body (GET/DELETE/HEAD/OPTIONS) or when no body kwargs remain.
+//
+// Imperfect: query/header params can't be distinguished from body params
+// at the call site, so they may leak into the body object. Fern's typical
+// shape (body kwargs in the JSON, headers/query passed separately at the
+// transport layer) means this misclassification is rare in practice.
+function deriveBodyFromKwargs(
+    httpMethod: string,
+    httpPath: string,
+    sdkCallArgs: unknown[],
+): unknown | null {
+    if (!["POST", "PUT", "PATCH"].includes(httpMethod)) return null;
+    const pathParams = new Set<string>();
+    for (const match of httpPath.matchAll(/\{(\w+)\}/g)) pathParams.add(match[1]);
+    const body: Record<string, unknown> = {};
+    let count = 0;
+    for (const arg of sdkCallArgs) {
+        if (!arg || typeof arg !== "object" || !("name" in arg) || !("value" in arg)) continue;
+        const { name, value } = arg as { name: unknown; value: unknown };
+        if (typeof name !== "string" || pathParams.has(name)) continue;
+        body[name] = value;
+        count++;
+    }
+    return count > 0 ? body : null;
+}
+
 function buildManifest(
     allEndpoints: EndpointMapping[],
     allExamples: TestExample[],
@@ -1295,12 +1466,17 @@ function buildManifest(
 
         if (endpoint) {
             const key = `${endpoint.httpMethod} ${endpoint.httpPath}`;
+            const body = example.requestBody ?? deriveBodyFromKwargs(
+                endpoint.httpMethod,
+                endpoint.httpPath,
+                example.sdkCallArgs,
+            );
             manifest.examples[key] = {
                 httpMethod: endpoint.httpMethod,
                 httpPath: endpoint.httpPath,
                 sdkMethodChain: endpoint.methodChain,
                 sdkMethodName: endpoint.methodName,
-                request: { body: example.requestBody, sdkCallArgs: example.sdkCallArgs },
+                request: { body, sdkCallArgs: example.sdkCallArgs },
                 response: { body: example.responseBody },
                 sdkCallSource: example.sdkCallSource,
             };
@@ -1419,6 +1595,7 @@ export {
     createJavaParser,
     createPythonParser,
     createTypeScriptParser,
+    deriveBodyFromKwargs,
     findTemplateMatch,
     isBalancedParens,
     javaBuildAccessorMap,
@@ -1436,6 +1613,7 @@ export {
     pyExtractHttpMethod,
     pyExtractRequestPath,
     pyExtractTestExamples,
+    pyParseKwargs,
     truncateAfterMatchingParen,
     tsExtractEndpoints,
     tsExtractTestExamples,
