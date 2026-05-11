@@ -1,0 +1,56 @@
+name: Bundle OpenAPI spec
+description: >-
+  Fetches the combined OpenAPI spec for an SDK's source commit from the
+  public phenoml-openapi-specs GCS bucket and commits it back to the
+  current branch if the file changed. Assumes the caller has already
+  checked out the target branch (with auth) and granted contents: write.
+
+inputs:
+  metadata-path:
+    description: "Path to Fern's metadata.json within the caller repo."
+    default: ".fern/metadata.json"
+  output-path:
+    description: "Where to write the bundled spec within the caller repo."
+    default: "openapi/openapi.json"
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch combined OpenAPI spec
+      shell: bash
+      env:
+        METADATA_PATH: ${{ inputs.metadata-path }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        commit_sha=$(jq -r .originGitCommit "$METADATA_PATH")
+        if [ -z "$commit_sha" ] || [ "$commit_sha" = "null" ]; then
+          echo "::error::originGitCommit missing from $METADATA_PATH"
+          exit 1
+        fi
+        echo "Fetching OpenAPI spec for originGitCommit=$commit_sha"
+        mkdir -p "$(dirname "$OUTPUT_PATH")"
+        # --retry-all-errors covers 404s while GCS upload is still in flight;
+        # --retry-max-time caps the total wait at ~5 minutes.
+        curl --fail --silent --show-error \
+          --retry 10 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
+          -o "$OUTPUT_PATH" \
+          "https://storage.googleapis.com/phenoml-openapi-specs/combined/specs-${commit_sha}.json"
+
+    - name: Commit spec if changed
+      shell: bash
+      env:
+        METADATA_PATH: ${{ inputs.metadata-path }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add "$OUTPUT_PATH"
+        # Use --cached so a brand-new (previously untracked) spec is also
+        # detected; plain `git diff` would report no change for it.
+        if git diff --cached --quiet -- "$OUTPUT_PATH"; then
+          echo "Spec unchanged; nothing to commit."
+          exit 0
+        fi
+        commit_sha=$(jq -r .originGitCommit "$METADATA_PATH")
+        git commit -m "chore: bundle OpenAPI spec for ${commit_sha}"
+        git push
