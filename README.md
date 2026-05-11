@@ -1,28 +1,9 @@
 # sdk-shared-actions
 
-Shared GitHub Actions for the Phenoml SDK repos (`phenoml-ts-sdk`,
-`phenoml-python-sdk`, `phenoml-java-sdk`). The contents are intentionally
-generic so the same logic can be wired into each generated SDK without
-duplication.
+Shared GitHub Actions for the Phenoml SDK repos.
 
-## Contents
-
-- [`bundle-openapi-spec`](bundle-openapi-spec/) — composite action that
-  fetches the combined OpenAPI spec for an SDK's source commit and
-  auto-commits it back to the calling PR. See
-  [`bundle-openapi-spec/README.md`](bundle-openapi-spec/README.md) for
-  usage.
-- [`verify-openapi-spec`](verify-openapi-spec/) — composite action that
-  fails an SDK's publish job if the bundled spec is missing or stale. See
-  [`verify-openapi-spec/README.md`](verify-openapi-spec/README.md) for
-  usage.
-
-## Versioning
-
-Tag releases (`v1`, `v1.1`, …) and pin SDK callers to a tag.
-
-## Source-of-truth
-
-The spec itself is generated and uploaded to GCS by
-[`phenoml_backend`'s publish-openapi-specs workflow](https://github.com/PhenoML/phenoml_backend/blob/main/.github/workflows/publish-openapi-specs.yml).
-This repo only handles fetching/bundling on the SDK side.
+- [`bundle-openapi-spec`](bundle-openapi-spec/README.md) — fetches the
+  combined OpenAPI spec for an SDK's source commit and auto-commits it
+  back to the calling PR.
+- [`verify-openapi-spec`](verify-openapi-spec/README.md) — fails an SDK's
+  publish job if the bundled spec is missing or stale.
