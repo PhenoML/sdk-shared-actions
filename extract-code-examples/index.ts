@@ -783,10 +783,38 @@ function pyParseValue(s: string): unknown {
     const trimmed = s.trim();
     if (!trimmed) return undefined;
     try {
-        return JSON.parse(pyToJsonLiteral(trimmed));
+        return JSON.parse(stripTrailingCommas(pyToJsonLiteral(trimmed)));
     } catch {
         return `<expr:${trimmed}>`;
     }
+}
+
+// Removes any `,` that precedes `]` or `}` (with optional whitespace between).
+// Python allows — and Black formats multi-line lists/dicts with — trailing
+// commas; JSON.parse rejects them, so without this strip every multi-line
+// kwarg value would fall through to the `<expr:...>` escape hatch.
+// String-literal aware so commas inside quoted values are preserved.
+function stripTrailingCommas(s: string): string {
+    let out = "";
+    let inString = false;
+    let quote = "";
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < s.length) { out += ch + s[i + 1]; i++; continue; }
+            if (ch === quote) inString = false;
+            out += ch;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; out += ch; continue; }
+        if (ch === ",") {
+            let j = i + 1;
+            while (j < s.length && /\s/.test(s[j])) j++;
+            if (j < s.length && (s[j] === "]" || s[j] === "}")) continue;
+        }
+        out += ch;
+    }
+    return out;
 }
 
 // Translates bare Python True/False/None to true/false/null so JSON.parse

@@ -427,6 +427,32 @@ describe("pyParseKwargs", () => {
             { name: "provider", value: "provider" },
         ]);
     });
+    test("accepts trailing commas in list and dict values (Black formatting)", () => {
+        // Black formats multi-line collections with trailing commas. The
+        // values are valid Python but rejected by JSON.parse — must be
+        // stripped before parsing or they fall through to <expr:...>.
+        const src = [
+            "client.foo.bar(",
+            "    items=[",
+            '        "a",',
+            '        "b",',
+            "    ],",
+            "    meta={",
+            '        "x": 1,',
+            '        "y": 2,',
+            "    },",
+            ")",
+        ].join("\n");
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "items", value: ["a", "b"] },
+            { name: "meta", value: { x: 1, y: 2 } },
+        ]);
+    });
+    test("preserves trailing-comma-like sequences inside string literals", () => {
+        // A literal `,]` inside a quoted value must not be elided.
+        const src = 'client.foo.bar(label="a,]b")';
+        expect(pyParseKwargs(src)).toEqual([{ name: "label", value: "a,]b" }]);
+    });
 });
 
 describe("deriveBodyFromKwargs", () => {
