@@ -18,8 +18,28 @@ runs:
     - name: Verify
       shell: bash
       env:
-        PHENOML_OPENAPI_METADATA_PATH: ${{ inputs.metadata-path }}
-        PHENOML_OPENAPI_SPEC_PATH: ${{ inputs.spec-path }}
-      # $GITHUB_ACTION_PATH points at this action's checkout, which lets us
-      # reference verify.js independent of the caller's working directory.
-      run: node "$GITHUB_ACTION_PATH/verify.js"
+        METADATA_PATH: ${{ inputs.metadata-path }}
+        SPEC_PATH: ${{ inputs.spec-path }}
+      run: |
+        # Pre-check the spec specifically so we can hint at the upstream
+        # workflow that should have produced it. jq's own "file not found"
+        # error covers the metadata case fine.
+        if [ ! -f "$SPEC_PATH" ]; then
+          echo "::error::$SPEC_PATH missing; bundle-openapi-spec workflow may not have run."
+          exit 1
+        fi
+        origin_commit=$(jq -r .originGitCommit "$METADATA_PATH")
+        if [ -z "$origin_commit" ] || [ "$origin_commit" = "null" ]; then
+          echo "::error::$METADATA_PATH has no originGitCommit field."
+          exit 1
+        fi
+        spec_version=$(jq -r .info.version "$SPEC_PATH")
+        if [ -z "$spec_version" ] || [ "$spec_version" = "null" ]; then
+          echo "::error::$SPEC_PATH has no info.version field."
+          exit 1
+        fi
+        if [ "$spec_version" != "$origin_commit" ]; then
+          echo "::error::Bundled spec version $spec_version does not match originGitCommit $origin_commit."
+          exit 1
+        fi
+        echo "OpenAPI spec OK (originGitCommit=$origin_commit)."
