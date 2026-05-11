@@ -18,11 +18,23 @@ jobs:
           # and the later `git push` has somewhere to go.
           ref: ${{ github.head_ref || github.ref_name }}
 
+      # github.workflow_ref has the form "owner/repo/path@ref" — e.g.
+      # "PhenoML/sdk-shared-actions/.github/workflows/extract-code-examples.yml@refs/heads/main".
+      # The ref after "@" is unambiguously the ref the caller pinned this
+      # reusable workflow to, so checking it out gives us the matching
+      # script revision. Avoids `github.workflow_sha`, whose semantics
+      # under `workflow_call` have been historically ambiguous.
+      - name: Resolve shared-actions ref
+        id: shared
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: echo "ref=${WORKFLOW_REF##*@}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout shared actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: PhenoML/sdk-shared-actions
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ steps.shared.outputs.ref }}
           path: .sdk-shared-actions
 
       - name: Setup Bun
