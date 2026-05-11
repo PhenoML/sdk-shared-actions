@@ -1,0 +1,45 @@
+name: Verify bundled OpenAPI spec
+description: >-
+  Verifies that an SDK has a valid bundled OpenAPI spec matching the source
+  commit recorded by Fern. Intended for use in SDK publish jobs as a
+  safety net for the bundle-openapi-spec reusable workflow.
+
+inputs:
+  metadata-path:
+    description: "Path to Fern's metadata.json within the caller repo."
+    default: ".fern/metadata.json"
+  spec-path:
+    description: "Path to the bundled OpenAPI spec within the caller repo."
+    default: "openapi/openapi.json"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify
+      shell: bash
+      env:
+        METADATA_PATH: ${{ inputs.metadata-path }}
+        SPEC_PATH: ${{ inputs.spec-path }}
+      run: |
+        # Pre-check the spec specifically so we can hint at the upstream
+        # workflow that should have produced it. jq's own "file not found"
+        # error covers the metadata case fine.
+        if [ ! -f "$SPEC_PATH" ]; then
+          echo "::error::$SPEC_PATH missing; bundle-openapi-spec workflow may not have run."
+          exit 1
+        fi
+        origin_commit=$(jq -r .originGitCommit "$METADATA_PATH")
+        if [ -z "$origin_commit" ] || [ "$origin_commit" = "null" ]; then
+          echo "::error::$METADATA_PATH has no originGitCommit field."
+          exit 1
+        fi
+        spec_version=$(jq -r .info.version "$SPEC_PATH")
+        if [ -z "$spec_version" ] || [ "$spec_version" = "null" ]; then
+          echo "::error::$SPEC_PATH has no info.version field."
+          exit 1
+        fi
+        if [ "$spec_version" != "$origin_commit" ]; then
+          echo "::error::Bundled spec version $spec_version does not match originGitCommit $origin_commit."
+          exit 1
+        fi
+        echo "OpenAPI spec OK (originGitCommit=$origin_commit)."
