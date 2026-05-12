@@ -1032,6 +1032,11 @@ describe("Java parser (streaming-endpoint fixture)", () => {
             methodChain: ["agent", "streamChat"],
         });
     });
+
+    test("flags methods returning `Iterable<...>` as streaming so the manifest doesn't surface the mock placeholder body", () => {
+        const streamChat = endpoints.find((e) => e.methodName === "streamChat");
+        expect(streamChat?.isStreaming).toBe(true);
+    });
 });
 
 describe("Java parser (multi-line signature fixture)", () => {
@@ -1174,5 +1179,72 @@ describe("buildManifest example-richness", () => {
     test("rich example overrides an earlier poor one (order-independent)", () => {
         const manifest = buildManifest([endpoint], [poor, rich], "python", "pkg", metadata);
         expect(manifest.examples["POST /foo"].request.body).toEqual({ name: "x" });
+    });
+});
+
+describe("buildManifest streaming endpoints", () => {
+    const metadata = {
+        generatorName: "fernapi/fern-java-sdk",
+        sdkVersion: "0.0.0",
+        originGitCommit: "deadbeef",
+    };
+
+    test("replaces the mock placeholder response with `streaming: true` and a null body", () => {
+        // The Java wire-test pattern enqueues a `{}` MockResponse for SSE
+        // endpoints because the test only exercises the request side — the
+        // SDK never parses that body. Without isStreaming, the manifest
+        // would advertise `response.body = {}`, misleading downstream docs.
+        const endpoints = [
+            {
+                httpMethod: "POST",
+                httpPath: "/agent/stream-chat",
+                methodChain: ["agent", "streamChat"],
+                methodName: "streamChat",
+                isStreaming: true,
+            },
+        ];
+        const examples = [
+            {
+                httpMethod: "POST",
+                httpPath: "/agent/stream-chat",
+                methodName: "streamChat",
+                describeBlock: "",
+                requestBody: { message: "hi" },
+                responseBody: {},
+                sdkCallArgs: [],
+                sdkCallSource: "client.agent().streamChat(...)",
+            },
+        ];
+        const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
+        const example = manifest.examples["POST /agent/stream-chat"];
+        expect(example.response).toEqual({ body: null, streaming: true });
+        expect(example.request.body).toEqual({ message: "hi" });
+    });
+
+    test("leaves non-streaming endpoints untouched", () => {
+        // Sanity check: the streaming branch must not regress the default
+        // JSON-body path that non-SSE endpoints rely on.
+        const endpoints = [
+            {
+                httpMethod: "POST",
+                httpPath: "/agent/chat",
+                methodChain: ["agent", "chat"],
+                methodName: "chat",
+            },
+        ];
+        const examples = [
+            {
+                httpMethod: "POST",
+                httpPath: "/agent/chat",
+                methodName: "chat",
+                describeBlock: "",
+                requestBody: { message: "hi" },
+                responseBody: { reply: "hello" },
+                sdkCallArgs: [],
+                sdkCallSource: "client.agent().chat(...)",
+            },
+        ];
+        const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
+        expect(manifest.examples["POST /agent/chat"].response).toEqual({ body: { reply: "hello" } });
     });
 });

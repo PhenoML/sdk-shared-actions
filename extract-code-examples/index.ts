@@ -43,6 +43,12 @@ interface EndpointMapping {
     // under the kwarg's name. Common for PATCH endpoints whose body is a
     // raw JSON Patch array.
     bodyPassthroughKwarg?: string;
+    // True for SSE/streaming endpoints. Detected from the SDK source:
+    // Java return type `PhenomlClientHttpResponse<Iterable<...>>`, Python
+    // `httpx_client.stream(...)` call. Wire tests for these enqueue a
+    // placeholder body (e.g. `{}`) that the SDK never parses as JSON, so
+    // the manifest must not surface that placeholder as a real response.
+    isStreaming?: boolean;
 }
 
 interface TestExample {
@@ -67,6 +73,9 @@ interface CodeExample {
     };
     response: {
         body: unknown | null;
+        // Set on SSE endpoints so docs can render an "event stream" badge
+        // instead of treating the (null) body as a missing-example signal.
+        streaming?: boolean;
     };
     sdkCallSource: string;
 }
@@ -571,10 +580,14 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
         }
 
         // Find httpx_client.request() or httpx_client.stream() call
-        if (currentMethod && /self\._client_wrapper\.httpx_client\.(request|stream)\s*\(/.test(line)) {
+        const clientCallMatch = line.match(/self\._client_wrapper\.httpx_client\.(request|stream)\s*\(/);
+        if (currentMethod && clientCallMatch) {
             const httpPath = pyExtractRequestPath(lines, i);
             const httpMethod = pyExtractHttpMethod(lines, i);
             const bodyShape = pyExtractBodyShape(lines, i);
+            // `httpx_client.stream(...)` returns a streaming context manager;
+            // the SDK parses SSE events from the body rather than JSON.
+            const isStreaming = clientCallMatch[1] === "stream";
 
             if (httpPath && httpMethod) {
                 // Also snake_case path-param names (Fern Python paths already
@@ -594,6 +607,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
                         ...(bodyShape?.passthroughKwarg !== undefined
                             ? { bodyPassthroughKwarg: bodyShape.passthroughKwarg }
                             : {}),
+                        ...(isStreaming ? { isStreaming: true } : {}),
                     });
                 }
             }
@@ -1216,12 +1230,31 @@ function javaExtractEndpoints(
     let currentMethod: string | null = null;
     let pathSegments: string[] = [];
     let httpMethod: string | null = null;
+    let isStreaming = false;
     let collectingPath = false;
     let braceDepth = 0;
     let methodBraceDepth = 0;
     const seen = new Set<string>();
     // Lexer state that persists across lines for constructs that can span lines.
     const lexState = { inBlockComment: false, inTextBlock: false };
+
+    // Closes over the loop locals so call sites just announce "save what
+    // we've gathered so far". No-ops when the gathered state is incomplete.
+    const pushEndpoint = () => {
+        if (!currentMethod || !httpMethod || pathSegments.length === 0) return;
+        const httpPath = normalizePath(pathSegments.join("/"));
+        const key = `${httpMethod} ${httpPath}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const entry: EndpointMapping = {
+            httpMethod,
+            httpPath,
+            methodChain: [...chain, currentMethod],
+            methodName: currentMethod,
+        };
+        if (isStreaming) entry.isStreaming = true;
+        endpoints.push(entry);
+    };
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
@@ -1235,21 +1268,17 @@ function javaExtractEndpoints(
         // Find method definition (only methods that return PhenomlClientHttpResponse).
         // Use greedy `.+` so nested generics like `Optional<Foo>` backtrack to land
         // on the outermost `>` before the method name; `[^>]+` would stop at the
-        // first inner `>` and miss the match entirely.
+        // first inner `>` and miss the match entirely. Capture the inner type so
+        // we can flag SSE endpoints (inner is `Iterable<...>`).
         const methodMatch = line.match(
-            /public\s+PhenomlClientHttpResponse<.+>\s+(\w+)\s*\(/,
+            /public\s+PhenomlClientHttpResponse<(.+)>\s+(\w+)\s*\(/,
         );
         if (methodMatch) {
-            // Save previous method if it had HTTP details
-            if (currentMethod && httpMethod && pathSegments.length > 0) {
-                const httpPath = normalizePath(pathSegments.join("/"));
-                const key = `${httpMethod} ${httpPath}`;
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    endpoints.push({ httpMethod, httpPath, methodChain: [...chain, currentMethod], methodName: currentMethod });
-                }
-            }
-            currentMethod = methodMatch[1];
+            pushEndpoint();
+            currentMethod = methodMatch[2];
+            // `Iterable<...>` is Fern's signal for an SSE-stream return; the
+            // method body uses `Stream.fromSse(...)` instead of JSON parsing.
+            isStreaming = /^Iterable\s*</.test(methodMatch[1].trim());
             pathSegments = [];
             httpMethod = null;
             collectingPath = false;
@@ -1269,14 +1298,7 @@ function javaExtractEndpoints(
         // immediately satisfy `< methodBraceDepth` and short-circuit the
         // newly-started method.
         else if (currentMethod && braceDepth < methodBraceDepth) {
-            if (httpMethod && pathSegments.length > 0) {
-                const httpPath = normalizePath(pathSegments.join("/"));
-                const key = `${httpMethod} ${httpPath}`;
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    endpoints.push({ httpMethod, httpPath, methodChain: [...chain, currentMethod], methodName: currentMethod });
-                }
-            }
+            pushEndpoint();
             currentMethod = null;
         }
 
@@ -1306,16 +1328,7 @@ function javaExtractEndpoints(
         if (httpMethodMatch) httpMethod = httpMethodMatch[1];
     }
 
-    // Save final method
-    if (currentMethod && httpMethod && pathSegments.length > 0) {
-        const httpPath = normalizePath(pathSegments.join("/"));
-        const key = `${httpMethod} ${httpPath}`;
-        if (!seen.has(key)) {
-            seen.add(key);
-            endpoints.push({ httpMethod, httpPath, methodChain: [...chain, currentMethod], methodName: currentMethod });
-        }
-    }
-
+    pushEndpoint();
     return endpoints;
 }
 
@@ -1698,13 +1711,17 @@ function buildManifest(
         if (endpoint) {
             const key = `${endpoint.httpMethod} ${endpoint.httpPath}`;
             const body = example.requestBody ?? deriveBodyFromKwargs(endpoint, example.sdkCallArgs);
+            // SSE: drop the mock placeholder body — see EndpointMapping.isStreaming.
+            const response: CodeExample["response"] = endpoint.isStreaming
+                ? { body: null, streaming: true }
+                : { body: example.responseBody };
             const candidate: CodeExample = {
                 httpMethod: endpoint.httpMethod,
                 httpPath: endpoint.httpPath,
                 sdkMethodChain: endpoint.methodChain,
                 sdkMethodName: endpoint.methodName,
                 request: { body, sdkCallArgs: example.sdkCallArgs },
-                response: { body: example.responseBody },
+                response,
                 sdkCallSource: example.sdkCallSource,
             };
             // Multiple wire tests can target the same endpoint (success +
