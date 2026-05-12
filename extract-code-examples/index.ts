@@ -672,8 +672,8 @@ function pyExtractBodyParamMap(lines: string[], startLine: number): Record<strin
             continue;
         }
         if (depth === 1 && ch === ":" && lastKey !== null) {
-            const tail = block.slice(i + 1).match(/^\s*([a-zA-Z_]\w*)/);
-            if (tail) map[tail[1]] = lastKey;
+            const kwarg = pyUnwrapBodyValue(block.slice(i + 1));
+            if (kwarg !== null) map[kwarg] = lastKey;
             lastKey = null;
         } else if (depth === 1 && ch === ",") {
             lastKey = null;
@@ -681,6 +681,31 @@ function pyExtractBodyParamMap(lines: string[], startLine: number): Record<strin
         i++;
     }
     return map;
+}
+
+// Returns the SDK kwarg name that supplies the body field starting at
+// position 0 of `s` (i.e., the slice just after `:` in `json={...}`).
+// Handles three shapes Fern emits:
+//   1. Bare identifier:           `conv_config`           → "conv_config"
+//   2. Positional wrapper:        `jsonable_encoder(x)`   → "x"
+//   3. `object_=`-keyed wrapper:  `helper(object_=x, ...)` → "x"
+//      (e.g. `convert_and_respect_annotation_metadata`, used by current
+//       Fern for serialization metadata.)
+// Returns null when the value isn't an identifier (string/number literal)
+// or the wrapper's args have no recoverable kwarg — the caller drops the
+// entry rather than guessing wrong.
+function pyUnwrapBodyValue(s: string): string | null {
+    const ident = s.match(/^\s*([a-zA-Z_]\w*)/);
+    if (!ident) return null;
+    const after = s.slice(ident[0].length);
+    if (!after.startsWith("(")) return ident[1];
+    const inner = pyExtractArgsPortion(after);
+    if (inner === null) return null;
+    const objArg = inner.match(/\bobject_\s*=\s*([a-zA-Z_]\w*)/);
+    if (objArg) return objArg[1];
+    const positional = inner.match(/^\s*([a-zA-Z_]\w*)(?=\s*(?:,|$))/);
+    if (positional) return positional[1];
+    return null;
 }
 
 function pyExtractTestExamples(

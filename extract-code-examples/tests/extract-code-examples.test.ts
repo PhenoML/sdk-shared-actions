@@ -437,6 +437,46 @@ describe("pyExtractBodyParamMap", () => {
     test("returns empty map for an empty `json={}`", () => {
         expect(pyExtractBodyParamMap(["    json={},"], 0)).toEqual({});
     });
+    test("unwraps `object_=<kwarg>` from Fern's serialization helper", () => {
+        // Current Fern emits this wrapper for fields with serialization
+        // metadata. The kwarg lives in the `object_=` arg, not as the
+        // wrapper's own name. (Reported against ElevenLabs' python SDK.)
+        const lines = [
+            "    json={",
+            '        "conversation_config": convert_and_respect_annotation_metadata(',
+            "            object_=conversation_config,",
+            "            annotation=AgentConversationConfig,",
+            '            direction="write",',
+            "        ),",
+            '        "name": name,',
+            "    },",
+        ];
+        expect(pyExtractBodyParamMap(lines, 0)).toEqual({
+            conversation_config: "conversation_config",
+            name: "name",
+        });
+    });
+    test("unwraps positional-arg wrappers like jsonable_encoder(value)", () => {
+        const lines = [
+            "    json={",
+            '        "id": jsonable_encoder(id),',
+            '        "tag": jsonable_encoder(tag),',
+            "    },",
+        ];
+        expect(pyExtractBodyParamMap(lines, 0)).toEqual({ id: "id", tag: "tag" });
+    });
+    test("drops fields whose wrapper has no recoverable kwarg", () => {
+        // A wrapper with only kwarg-style args (none `object_=`) can't be
+        // unwrapped. Returning null drops the field rather than emitting
+        // the wrapper function name, which would never match an SDK kwarg.
+        const lines = [
+            "    json={",
+            '        "ok": helper(named=value, other=thing),',
+            '        "name": name,',
+            "    },",
+        ];
+        expect(pyExtractBodyParamMap(lines, 0)).toEqual({ name: "name" });
+    });
 });
 
 describe("pyParseKwargs", () => {
