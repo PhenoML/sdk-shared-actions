@@ -760,16 +760,15 @@ describe("Python parser (Authtoken auth fixture)", () => {
     test("buildManifest derives request.body from kwargs for POST endpoints", () => {
         // End-to-end: the Python parser doesn't capture body literals from
         // tests, so buildManifest must derive `body` from sdkCallArgs.
-        // Filter to the kwarg-bearing example because the fixture also
-        // contains a no-args call for the same endpoint (long-body test)
-        // which would otherwise overwrite the kwarg one in the manifest.
+        // Both test_authtoken_auth.py (kwargs) and test_long_body.py (no
+        // kwargs) target /v2/auth/token; buildManifest's richness check
+        // must keep the kwarg-bearing one regardless of file order.
         const metadata = {
             generatorName: "fernapi/fern-python-sdk",
             sdkVersion: "0.0.0",
             originGitCommit: "deadbeef",
         };
-        const withKwargs = examples.filter((e) => e.sdkCallArgs.length > 0);
-        const manifest = buildManifest(endpoints, withKwargs, "python", "pkg", metadata);
+        const manifest = buildManifest(endpoints, examples, "python", "pkg", metadata);
         const entry = manifest.examples["POST /v2/auth/token"];
         expect(entry).toBeDefined();
         expect(entry.request.body).toEqual({
@@ -929,5 +928,55 @@ describe("buildManifest chain-index", () => {
         const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
         // Neither endpoint should be matched via the (now-dropped) chain index.
         expect(Object.keys(manifest.examples)).toEqual([]);
+    });
+});
+
+describe("buildManifest example-richness", () => {
+    const metadata = {
+        generatorName: "fernapi/fern-python-sdk",
+        sdkVersion: "0.0.0",
+        originGitCommit: "deadbeef",
+    };
+    const endpoint = {
+        httpMethod: "POST",
+        httpPath: "/foo",
+        methodChain: ["foo"],
+        methodName: "foo",
+        bodyParamMap: { name: "name" },
+    };
+    const rich = {
+        httpMethod: "POST",
+        httpPath: "/foo",
+        methodName: "foo",
+        describeBlock: "",
+        requestBody: null,
+        responseBody: { ok: true },
+        sdkCallArgs: [{ name: "name", value: "x" }],
+        sdkCallSource: 'client.foo.foo(name="x")',
+    };
+    const poor = {
+        httpMethod: "POST",
+        httpPath: "/foo",
+        methodName: "foo",
+        describeBlock: "",
+        requestBody: null,
+        responseBody: null,
+        sdkCallArgs: [],
+        sdkCallSource: "client.foo.foo()",
+    };
+
+    test("keeps the kwarg-bearing example when a later test has no kwargs", () => {
+        // Bug: when fixture files sort such that a no-kwargs test comes
+        // AFTER a kwargs-bearing test for the same endpoint, the later
+        // (poorer) example used to overwrite the richer one, erasing the
+        // derived body and sdkCallArgs.
+        const manifest = buildManifest([endpoint], [rich, poor], "python", "pkg", metadata);
+        expect(manifest.examples["POST /foo"].request.body).toEqual({ name: "x" });
+        expect(manifest.examples["POST /foo"].request.sdkCallArgs).toEqual([{ name: "name", value: "x" }]);
+    });
+
+    test("rich example overrides an earlier poor one (order-independent)", () => {
+        const manifest = buildManifest([endpoint], [poor, rich], "python", "pkg", metadata);
+        expect(manifest.examples["POST /foo"].request.body).toEqual({ name: "x" });
     });
 });

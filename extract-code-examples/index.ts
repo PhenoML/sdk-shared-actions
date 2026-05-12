@@ -1500,6 +1500,18 @@ function deriveBodyFromKwargs(
 
 // Returns a function mapping an SDK kwarg name to its body field name,
 // or null if the kwarg shouldn't be in the body at all.
+// Counts how many of {body, sdkCallArgs, responseBody, sdkCallSource}
+// carry data. Used to decide which of two examples for the same endpoint
+// should land in the manifest — higher score wins, ties keep the first.
+function codeExampleRichness(ex: CodeExample): number {
+    let score = 0;
+    if (ex.request.body !== null) score++;
+    if (ex.request.sdkCallArgs.length > 0) score++;
+    if (ex.response.body !== null) score++;
+    if (ex.sdkCallSource) score++;
+    return score;
+}
+
 function bodyKeyResolver(endpoint: EndpointMapping): (name: string) => string | null {
     if (endpoint.bodyParamMap !== undefined) {
         const map = endpoint.bodyParamMap;
@@ -1569,7 +1581,7 @@ function buildManifest(
         if (endpoint) {
             const key = `${endpoint.httpMethod} ${endpoint.httpPath}`;
             const body = example.requestBody ?? deriveBodyFromKwargs(endpoint, example.sdkCallArgs);
-            manifest.examples[key] = {
+            const candidate: CodeExample = {
                 httpMethod: endpoint.httpMethod,
                 httpPath: endpoint.httpPath,
                 sdkMethodChain: endpoint.methodChain,
@@ -1578,6 +1590,15 @@ function buildManifest(
                 response: { body: example.responseBody },
                 sdkCallSource: example.sdkCallSource,
             };
+            // Multiple wire tests can target the same endpoint (success +
+            // variants, or — like the python fixture — a test that omits
+            // kwargs to exercise an unrelated parser path). Prefer the
+            // richer entry so an emptier later test can't erase a body or
+            // call-args populated by an earlier one.
+            const existing = manifest.examples[key];
+            if (!existing || codeExampleRichness(candidate) > codeExampleRichness(existing)) {
+                manifest.examples[key] = candidate;
+            }
             matched++;
         } else {
             console.error(`  WARNING: No endpoint match for test: ${exactKey}`);
