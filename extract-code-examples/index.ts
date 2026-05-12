@@ -1571,13 +1571,16 @@ function findTemplateMatch(
 // When `endpoint.bodyPassthroughKwarg` is set, the entire HTTP body is that
 // kwarg's value (no field wrapping) — used by raw clients that pass the
 // argument directly as `json=<kwarg>` or `json=wrapper(object_=<kwarg>, ...)`.
-// Otherwise when `endpoint.bodyParamMap` is set (extracted from the raw
-// client's `json={...}` dict), use it both to exclude header/query/path
-// kwargs AND to translate the kwarg name back to the JSON field name (Fern
-// sometimes aliases, e.g., `"someField": some_field`). Literal-valued
-// fields from the dict (e.g., `"resourceType": "Bundle"`) are merged in
-// via `endpoint.bodyLiterals`. Otherwise fall back to "everything except
-// path params" with the kwarg name used as the body key — imperfect
+// If the kwarg isn't present in the call args, the `json=<ident>` was likely
+// an intermediate variable built earlier in the method body rather than a
+// real SDK parameter, so fall through to the kwarg-based heuristic below
+// instead of dropping the body. Otherwise when `endpoint.bodyParamMap` is
+// set (extracted from the raw client's `json={...}` dict), use it both to
+// exclude header/query/path kwargs AND to translate the kwarg name back to
+// the JSON field name (Fern sometimes aliases, e.g., `"someField": some_field`).
+// Literal-valued fields from the dict (e.g., `"resourceType": "Bundle"`) are
+// merged in via `endpoint.bodyLiterals`. Otherwise fall back to "everything
+// except path params" with the kwarg name used as the body key — imperfect
 // (header/query kwargs leak; aliased fields emit the wrong key) but the
 // best we can do without raw-client info.
 function deriveBodyFromKwargs(
@@ -1592,7 +1595,9 @@ function deriveBodyFromKwargs(
             const { name, value } = arg as { name: unknown; value: unknown };
             if (name === target) return value;
         }
-        return null;
+        // Fall through: the kwarg isn't in the call args, so treat
+        // `json=<ident>` as a non-passthrough builder variable and let
+        // the kwarg-based heuristic assemble the body.
     }
     const resolveKey = bodyKeyResolver(endpoint);
     const body: Record<string, unknown> = { ...(endpoint.bodyLiterals ?? {}) };

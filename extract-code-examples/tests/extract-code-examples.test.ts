@@ -726,9 +726,10 @@ describe("deriveBodyFromKwargs", () => {
             ),
         ).toEqual([{ op: "replace", path: "/name", value: "new" }]);
     });
-    test("returns null when the passthrough kwarg isn't in the call args", () => {
-        // A test that didn't supply `request=...` can't fill the body; null
-        // is preferable to silently emitting an unrelated kwarg's value.
+    test("returns null when passthrough kwarg is missing and only path-param kwargs remain", () => {
+        // The passthrough kwarg isn't in the call args, so we fall through
+        // to the kwarg heuristic — which itself returns null when the only
+        // remaining kwarg is a path param.
         const args = [{ name: "id", value: "agent-123" }];
         expect(
             deriveBodyFromKwargs(
@@ -736,6 +737,39 @@ describe("deriveBodyFromKwargs", () => {
                 args,
             ),
         ).toBeNull();
+    });
+    test("falls back to the kwarg heuristic when passthrough kwarg names an intermediate variable", () => {
+        // If a raw client builds `body = {...}` then does `json=body`, the
+        // parser marks `body` as the passthrough kwarg — but the test
+        // supplies the original SDK kwargs, not `body`. We must fall through
+        // to the path-param-exclusion heuristic so the body isn't dropped.
+        const args = [
+            { name: "name", value: "x" },
+            { name: "count", value: 3 },
+        ];
+        const result = deriveBodyFromKwargs(
+            endpoint({ httpMethod: "POST", httpPath: "/foo", bodyPassthroughKwarg: "body" }),
+            args,
+        );
+        expect(result).toEqual({ name: "x", count: 3 });
+    });
+    test("merges bodyLiterals into the fallback body when passthrough kwarg is absent", () => {
+        // The passthrough kwarg isn't in the args, so we fall through —
+        // but any captured literals from a `json={...}` shape should still
+        // be merged. (In practice a single endpoint won't have both
+        // passthrough and literals, but the fallback should remain
+        // self-consistent.)
+        const args = [{ name: "name", value: "x" }];
+        const result = deriveBodyFromKwargs(
+            endpoint({
+                httpMethod: "POST",
+                httpPath: "/foo",
+                bodyPassthroughKwarg: "body",
+                bodyLiterals: { kind: "literal" },
+            }),
+            args,
+        );
+        expect(result).toEqual({ kind: "literal", name: "x" });
     });
     test("merges bodyLiterals into the derived body alongside kwarg fields", () => {
         // The FHIR bundle case: `resourceType: "Bundle"` is a literal in
