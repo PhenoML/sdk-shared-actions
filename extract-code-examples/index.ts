@@ -949,10 +949,11 @@ function javaExtractEndpoints(
 
         if (!currentMethod) continue;
 
-        // Detect URL builder start
-        if (line.includes(".newBuilder()")) {
+        // Streaming endpoints call `.newBuilder()` twice per method — once on
+        // `HttpUrl` for the path, again on `OkHttpClient` for the call timeout.
+        // Only the first is the URL builder.
+        if (line.includes(".newBuilder()") && pathSegments.length === 0) {
             collectingPath = true;
-            pathSegments = [];
         }
 
         if (collectingPath) {
