@@ -18,6 +18,7 @@ import {
     normalizePathParams,
     pyDeriveMethodChain,
     pyExtractBodyParamMap,
+    pyExtractBodyShape,
     pyExtractHttpMethod,
     pyExtractRequestPath,
     pyParseKwargs,
@@ -479,6 +480,80 @@ describe("pyExtractBodyParamMap", () => {
     });
 });
 
+describe("pyExtractBodyShape", () => {
+    test("returns dict shape with fields and inline literals", () => {
+        // The FHIR bundle case: `resourceType` is a fixed string literal
+        // baked into the raw client, not sourced from a kwarg. Without
+        // capturing it as a literal, the manifest body would silently
+        // omit a wire field the SDK actually sends.
+        const lines = [
+            "self._client_wrapper.httpx_client.request(",
+            '    "fhir-provider/{id}/fhir",',
+            '    method="POST",',
+            "    json={",
+            '        "total": total,',
+            '        "entry": convert_and_respect_annotation_metadata(',
+            "            object_=entry, annotation=Foo, direction=\"write\"",
+            "        ),",
+            '        "resourceType": "Bundle",',
+            "    },",
+            ")",
+        ];
+        expect(pyExtractBodyShape(lines, 0)).toEqual({
+            fields: { total: "total", entry: "entry" },
+            literals: { resourceType: "Bundle" },
+        });
+    });
+
+    test("captures numeric, bool, and null inline literals", () => {
+        const lines = [
+            "    json={",
+            '        "version": 2,',
+            '        "active": True,',
+            '        "verified": False,',
+            '        "metadata": None,',
+            '        "ratio": 1.5,',
+            "    },",
+        ];
+        expect(pyExtractBodyShape(lines, 0)).toEqual({
+            fields: {},
+            literals: { version: 2, active: true, verified: false, metadata: null, ratio: 1.5 },
+        });
+    });
+
+    test("omits literals from result when none are present", () => {
+        // No literals → no `literals` key, so downstream consumers can
+        // continue to use the absence as a fast-path check.
+        const lines = ["    json={", '        "name": name,', "    },"];
+        expect(pyExtractBodyShape(lines, 0)).toEqual({ fields: { name: "name" } });
+    });
+
+    test("returns passthrough kwarg for `json=<wrapper>(object_=kwarg, ...)`", () => {
+        // The PATCH case: body is the raw kwarg value (a JSON Patch array),
+        // not a dict of fields. The shape captures the kwarg name so the
+        // body emitter knows to use its value directly.
+        const lines = [
+            'f"agent/{jsonable_encoder(id)}",',
+            '    method="PATCH",',
+            "    json=convert_and_respect_annotation_metadata(object_=request, annotation=JsonPatch, direction=\"write\"),",
+            "    headers={",
+            '        "content-type": "application/json+patch",',
+            "    },",
+        ];
+        expect(pyExtractBodyShape(lines, 0)).toEqual({ passthroughKwarg: "request" });
+    });
+
+    test("returns passthrough kwarg for bare `json=<kwarg>`", () => {
+        const lines = ['    method="POST",', "    json=body,"];
+        expect(pyExtractBodyShape(lines, 0)).toEqual({ passthroughKwarg: "body" });
+    });
+
+    test("returns null when no `json=` argument is present", () => {
+        const lines = ["    method=\"GET\",", "    request_options=request_options,"];
+        expect(pyExtractBodyShape(lines, 0)).toBeNull();
+    });
+});
+
 describe("pyParseKwargs", () => {
     test("parses simple string/number/bool/null kwargs", () => {
         const src = 'client.foo.bar(name="x", count=3, ok=True, missing=None, flag=False)';
@@ -557,7 +632,15 @@ describe("pyParseKwargs", () => {
 });
 
 describe("deriveBodyFromKwargs", () => {
-    function endpoint(over: Partial<{ httpMethod: string; httpPath: string; bodyParamMap?: Record<string, string> }>) {
+    function endpoint(
+        over: Partial<{
+            httpMethod: string;
+            httpPath: string;
+            bodyParamMap?: Record<string, string>;
+            bodyLiterals?: Record<string, unknown>;
+            bodyPassthroughKwarg?: string;
+        }>,
+    ) {
         return {
             httpMethod: "POST",
             httpPath: "/foo",
@@ -628,6 +711,69 @@ describe("deriveBodyFromKwargs", () => {
         // derivation must skip them so it doesn't misclassify TS bodies.
         const args = [{ some: "object", literal: true }];
         expect(deriveBodyFromKwargs(endpoint({}), args)).toBeNull();
+    });
+    test("returns the passthrough kwarg's value directly as the body", () => {
+        // The PATCH case: `json=convert_and_respect_annotation_metadata(object_=request, ...)`.
+        // The body IS the JSON Patch array, not `{"request": [...]}`.
+        const args = [
+            { name: "id", value: "agent-123" },
+            { name: "request", value: [{ op: "replace", path: "/name", value: "new" }] },
+        ];
+        expect(
+            deriveBodyFromKwargs(
+                endpoint({ httpMethod: "PATCH", httpPath: "/agent/{id}", bodyPassthroughKwarg: "request" }),
+                args,
+            ),
+        ).toEqual([{ op: "replace", path: "/name", value: "new" }]);
+    });
+    test("returns null when the passthrough kwarg isn't in the call args", () => {
+        // A test that didn't supply `request=...` can't fill the body; null
+        // is preferable to silently emitting an unrelated kwarg's value.
+        const args = [{ name: "id", value: "agent-123" }];
+        expect(
+            deriveBodyFromKwargs(
+                endpoint({ httpMethod: "PATCH", httpPath: "/agent/{id}", bodyPassthroughKwarg: "request" }),
+                args,
+            ),
+        ).toBeNull();
+    });
+    test("merges bodyLiterals into the derived body alongside kwarg fields", () => {
+        // The FHIR bundle case: `resourceType: "Bundle"` is a literal in
+        // the raw client's `json={...}` dict. The manifest body must
+        // include it so consumers replaying the example send a valid
+        // FHIR Bundle (which requires resourceType).
+        const args = [
+            { name: "fhir_provider_id", value: "provider-id" },
+            { name: "entry", value: [{ resource: { resourceType: "Patient" } }] },
+            { name: "total", value: 1 },
+        ];
+        expect(
+            deriveBodyFromKwargs(
+                endpoint({
+                    httpPath: "/fhir-provider/{fhir_provider_id}/fhir",
+                    bodyParamMap: { entry: "entry", total: "total" },
+                    bodyLiterals: { resourceType: "Bundle" },
+                }),
+                args,
+            ),
+        ).toEqual({
+            resourceType: "Bundle",
+            entry: [{ resource: { resourceType: "Patient" } }],
+            total: 1,
+        });
+    });
+    test("returns literals-only body when no kwargs supply field values", () => {
+        // Tests that omit kwargs still produce a body documenting the
+        // SDK's fixed literal fields rather than null.
+        expect(
+            deriveBodyFromKwargs(
+                endpoint({
+                    bodyParamMap: { entry: "entry" },
+                    bodyLiterals: { resourceType: "Bundle" },
+                }),
+                [],
+            ),
+        ).toEqual({ resourceType: "Bundle" });
     });
 });
 

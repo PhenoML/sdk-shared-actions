@@ -32,6 +32,17 @@ interface EndpointMapping {
     // (their parsers read body from a test literal) or when the raw client
     // doesn't use a `json={...}` dict literal (e.g., `json=body_var`).
     bodyParamMap?: Record<string, string>;
+    // Python-only: literal JSON-field values hard-coded in the raw client's
+    // `json={...}` dict (e.g., `"resourceType": "Bundle"`). Merged into the
+    // derived body alongside kwarg-sourced fields so the manifest reflects
+    // the full payload the SDK sends, not just the kwarg-provided portion.
+    bodyLiterals?: Record<string, unknown>;
+    // Python-only: when the raw client passes a single kwarg directly as
+    // the JSON body (`json=<kwarg>` or `json=wrapper(object_=<kwarg>, ...)`),
+    // the entire HTTP body IS that kwarg's value — not a dict that wraps it
+    // under the kwarg's name. Common for PATCH endpoints whose body is a
+    // raw JSON Patch array.
+    bodyPassthroughKwarg?: string;
 }
 
 interface TestExample {
@@ -563,7 +574,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
         if (currentMethod && /self\._client_wrapper\.httpx_client\.(request|stream)\s*\(/.test(line)) {
             const httpPath = pyExtractRequestPath(lines, i);
             const httpMethod = pyExtractHttpMethod(lines, i);
-            const bodyParamMap = pyExtractBodyParamMap(lines, i);
+            const bodyShape = pyExtractBodyShape(lines, i);
 
             if (httpPath && httpMethod) {
                 // Also snake_case path-param names (Fern Python paths already
@@ -578,7 +589,11 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
                         httpPath: normalizedPath,
                         methodChain: [...chain, currentMethod],
                         methodName: currentMethod,
-                        ...(bodyParamMap !== null ? { bodyParamMap } : {}),
+                        ...(bodyShape?.fields !== undefined ? { bodyParamMap: bodyShape.fields } : {}),
+                        ...(bodyShape?.literals !== undefined ? { bodyLiterals: bodyShape.literals } : {}),
+                        ...(bodyShape?.passthroughKwarg !== undefined
+                            ? { bodyPassthroughKwarg: bodyShape.passthroughKwarg }
+                            : {}),
                     });
                 }
             }
@@ -626,23 +641,48 @@ function pyExtractHttpMethod(lines: string[], startLine: number): string | null 
     return null;
 }
 
-// Scans the raw-client method body for `json={...}` and returns a map
-// of SDK kwarg name → JSON field name for each top-level entry of the
-// form `"<jsonField>": <kwarg>`. Fern sometimes aliases the wire field
-// (e.g., `"someField": some_field`), so we have to preserve both sides
-// — using just the kwarg name as the body key produces an HTTP body
-// that doesn't match what the SDK actually sends.
-//
-// Returns null when no `json={` dict literal is found, so callers can
-// fall back to their old heuristic for non-dict bodies (e.g., `json=body_var`).
-function pyExtractBodyParamMap(lines: string[], startLine: number): Record<string, string> | null {
+// Shape of the raw client's `json=` body as parsed from the request call.
+// At most one of {fields/literals} and {passthroughKwarg} is populated; the
+// fields/literals case is the `json={...}` dict shape, passthroughKwarg is
+// the `json=<kwarg>` or `json=wrapper(object_=kwarg, ...)` shape.
+interface PyBodyShape {
+    fields?: Record<string, string>;
+    literals?: Record<string, unknown>;
+    passthroughKwarg?: string;
+}
+
+// Inspects `json=...` on the request call and returns its shape. Returns
+// null when no `json=` argument is present (e.g., GET endpoints) or when
+// the value is too exotic to unwrap.
+function pyExtractBodyShape(lines: string[], startLine: number): PyBodyShape | null {
     const block = lines.slice(startLine, startLine + 100).join("\n");
-    const match = block.match(/\bjson\s*=\s*\{/);
+    const match = block.match(/\bjson\s*=\s*/);
     if (!match) return null;
-    const map: Record<string, string> = {};
+    const start = match.index! + match[0].length;
+    if (block[start] === "{") {
+        return pyScanJsonDict(block, start);
+    }
+    // Non-dict body: the entire HTTP payload is a single kwarg's value
+    // (possibly wrapped by a serialization helper like
+    // `convert_and_respect_annotation_metadata(object_=request, ...)`).
+    // Used by PATCH endpoints whose body is a raw JSON Patch array.
+    const kwarg = pyUnwrapBodyValue(block.slice(start));
+    if (kwarg !== null) return { passthroughKwarg: kwarg };
+    return null;
+}
+
+// Scans a `json={...}` dict literal starting at `openIdx` (the `{`),
+// capturing both kwarg-sourced fields and inline literal values. Each
+// top-level entry is `"<jsonField>": <value>`:
+//   - if <value> unwraps to an identifier, it's an SDK kwarg → fields[kwarg] = jsonField
+//   - if <value> is a string/number/bool/null literal → literals[jsonField] = value
+//   - otherwise (nested dict/expression we can't resolve), the field is dropped
+function pyScanJsonDict(block: string, openIdx: number): PyBodyShape {
+    const fields: Record<string, string> = {};
+    const literals: Record<string, unknown> = {};
     let depth = 0;
     let lastKey: string | null = null;
-    let i = match.index! + match[0].length - 1; // at the `{`
+    let i = openIdx; // at the `{`
     while (i < block.length) {
         const ch = block[i];
         if (ch === '"' || ch === "'") {
@@ -672,15 +712,69 @@ function pyExtractBodyParamMap(lines: string[], startLine: number): Record<strin
             continue;
         }
         if (depth === 1 && ch === ":" && lastKey !== null) {
-            const kwarg = pyUnwrapBodyValue(block.slice(i + 1));
-            if (kwarg !== null) map[kwarg] = lastKey;
+            const after = block.slice(i + 1);
+            const kwarg = pyUnwrapBodyValue(after);
+            if (kwarg !== null) {
+                fields[kwarg] = lastKey;
+            } else {
+                const literal = pyParseInlineLiteral(after);
+                if (literal !== undefined) literals[lastKey] = literal;
+            }
             lastKey = null;
         } else if (depth === 1 && ch === ",") {
             lastKey = null;
         }
         i++;
     }
-    return map;
+    const out: PyBodyShape = { fields };
+    if (Object.keys(literals).length > 0) out.literals = literals;
+    return out;
+}
+
+// Back-compat shim for tests. Returns the kwarg → JSON field name map
+// when the body is a `json={...}` dict, or null otherwise. Production
+// code uses pyExtractBodyShape directly to also access literals and
+// passthrough info.
+function pyExtractBodyParamMap(lines: string[], startLine: number): Record<string, string> | null {
+    return pyExtractBodyShape(lines, startLine)?.fields ?? null;
+}
+
+// Parses a Python literal (string, int, float, True/False/None) from the
+// start of `s`. Returns the JS value or undefined when `s` doesn't begin
+// with a recognizable literal. Skips leading whitespace.
+function pyParseInlineLiteral(s: string): unknown | undefined {
+    let i = 0;
+    while (i < s.length && /\s/.test(s[i])) i++;
+    if (i >= s.length) return undefined;
+    const ch = s[i];
+    if (ch === '"' || ch === "'") {
+        const quote = ch;
+        let out = "";
+        let j = i + 1;
+        while (j < s.length) {
+            if (s[j] === "\\" && j + 1 < s.length) {
+                const next = s[j + 1];
+                if (next === "n") out += "\n";
+                else if (next === "t") out += "\t";
+                else if (next === "r") out += "\r";
+                else if (next === '"' || next === "'" || next === "\\") out += next;
+                else out += next;
+                j += 2;
+                continue;
+            }
+            if (s[j] === quote) return out;
+            out += s[j];
+            j++;
+        }
+        return undefined; // unterminated
+    }
+    const numMatch = s.slice(i).match(/^(-?\d+(?:\.\d+)?)(?=\s*[,}\]])/);
+    if (numMatch) return Number(numMatch[1]);
+    const rest = s.slice(i);
+    if (/^True(?=\s*[,}\]])/.test(rest)) return true;
+    if (/^False(?=\s*[,}\]])/.test(rest)) return false;
+    if (/^None(?=\s*[,}\]])/.test(rest)) return null;
+    return undefined;
 }
 
 // Returns the SDK kwarg name that supplies the body field starting at
@@ -697,6 +791,9 @@ function pyExtractBodyParamMap(lines: string[], startLine: number): Record<strin
 function pyUnwrapBodyValue(s: string): string | null {
     const ident = s.match(/^\s*([a-zA-Z_]\w*)/);
     if (!ident) return null;
+    // Python literal keywords aren't kwargs — let the caller fall through
+    // to literal parsing instead of producing a phantom "True" kwarg.
+    if (ident[1] === "True" || ident[1] === "False" || ident[1] === "None") return null;
     const after = s.slice(ident[0].length);
     if (!after.startsWith("(")) return ident[1];
     const inner = pyExtractArgsPortion(after);
@@ -1471,21 +1568,35 @@ function findTemplateMatch(
     return undefined;
 }
 
-// When `endpoint.bodyParamMap` is set (extracted from the raw client's
-// `json={...}` dict), use it both to exclude header/query/path kwargs
-// AND to translate the kwarg name back to the JSON field name (Fern
-// sometimes aliases, e.g., `"someField": some_field`). Otherwise fall
-// back to "everything except path params" with the kwarg name used as
-// the body key — imperfect (header/query kwargs leak; aliased fields
-// emit the wrong key) but the best we can do without raw-client info.
+// When `endpoint.bodyPassthroughKwarg` is set, the entire HTTP body is that
+// kwarg's value (no field wrapping) — used by raw clients that pass the
+// argument directly as `json=<kwarg>` or `json=wrapper(object_=<kwarg>, ...)`.
+// Otherwise when `endpoint.bodyParamMap` is set (extracted from the raw
+// client's `json={...}` dict), use it both to exclude header/query/path
+// kwargs AND to translate the kwarg name back to the JSON field name (Fern
+// sometimes aliases, e.g., `"someField": some_field`). Literal-valued
+// fields from the dict (e.g., `"resourceType": "Bundle"`) are merged in
+// via `endpoint.bodyLiterals`. Otherwise fall back to "everything except
+// path params" with the kwarg name used as the body key — imperfect
+// (header/query kwargs leak; aliased fields emit the wrong key) but the
+// best we can do without raw-client info.
 function deriveBodyFromKwargs(
     endpoint: EndpointMapping,
     sdkCallArgs: unknown[],
 ): unknown | null {
     if (!["POST", "PUT", "PATCH"].includes(endpoint.httpMethod)) return null;
+    if (endpoint.bodyPassthroughKwarg !== undefined) {
+        const target = endpoint.bodyPassthroughKwarg;
+        for (const arg of sdkCallArgs) {
+            if (!arg || typeof arg !== "object" || !("name" in arg) || !("value" in arg)) continue;
+            const { name, value } = arg as { name: unknown; value: unknown };
+            if (name === target) return value;
+        }
+        return null;
+    }
     const resolveKey = bodyKeyResolver(endpoint);
-    const body: Record<string, unknown> = {};
-    let count = 0;
+    const body: Record<string, unknown> = { ...(endpoint.bodyLiterals ?? {}) };
+    let count = Object.keys(body).length;
     for (const arg of sdkCallArgs) {
         if (!arg || typeof arg !== "object" || !("name" in arg) || !("value" in arg)) continue;
         const { name, value } = arg as { name: unknown; value: unknown };
@@ -1729,6 +1840,7 @@ export {
     normalizePathParams,
     pyDeriveMethodChain,
     pyExtractBodyParamMap,
+    pyExtractBodyShape,
     pyExtractEndpoints,
     pyExtractHttpMethod,
     pyExtractRequestPath,
