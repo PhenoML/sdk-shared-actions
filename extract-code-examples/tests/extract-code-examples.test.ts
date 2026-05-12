@@ -7,6 +7,7 @@ import {
     createPythonParser,
     createTypeScriptParser,
     isBalancedParens,
+    javaBuildAccessorMap,
     javaCountBraceDelta,
     javaDeriveMethodChain,
     javaExtractConcatenatedString,
@@ -168,6 +169,26 @@ describe("javaExtractSetBody", () => {
         ];
         expect(javaExtractSetBody(lines, 0)).toBe('{"token":"abc"}');
     });
+
+    test("resolves setBody(TestResources.loadResource(...)) to fixture file contents", () => {
+        const root = path.join(FIXTURES, "java-accessor");
+        const lines = [
+            "server.enqueue(new MockResponse()",
+            "    .setResponseCode(200)",
+            '    .setBody(TestResources.loadResource("/wire-tests/FhirProviderWireTest_testCreate_response.json")));',
+        ];
+        const body = javaExtractSetBody(lines, 0, root);
+        expect(body).not.toBeNull();
+        expect(JSON.parse(body!)).toMatchObject({ success: true });
+    });
+
+    test("returns null without rootDir when only TestResources.loadResource is present", () => {
+        const lines = [
+            "server.enqueue(new MockResponse()",
+            '    .setBody(TestResources.loadResource("/wire-tests/whatever.json")));',
+        ];
+        expect(javaExtractSetBody(lines, 0)).toBeNull();
+    });
 });
 
 describe("javaExtractConcatenatedString", () => {
@@ -181,6 +202,49 @@ describe("javaExtractConcatenatedString", () => {
         const result = javaExtractConcatenatedString(lines, 0);
         expect(result).toBe('{\n  "a": 1,\n  "b": 2\n}');
     });
+
+    test("resolves expected* = TestResources.loadResource(...) to fixture file contents", () => {
+        const root = path.join(FIXTURES, "java-accessor");
+        const lines = [
+            "String expectedResponseBody =",
+            '        TestResources.loadResource("/wire-tests/FhirProviderWireTest_testCreate_response.json");',
+        ];
+        const body = javaExtractConcatenatedString(lines, 0, root);
+        expect(body).not.toBeNull();
+        expect(JSON.parse(body!)).toMatchObject({ success: true });
+    });
+});
+
+describe("javaBuildAccessorMap", () => {
+    const root = path.join(FIXTURES, "java-accessor");
+    const javaDir = path.join(root, "src/main/java");
+
+    test("maps directory paths to camelCase accessor method names", () => {
+        const map = javaBuildAccessorMap(javaDir);
+        expect(map.get(path.join(javaDir, "com/phenoml/api/resources/fhirprovider"))).toBe(
+            "fhirProvider",
+        );
+        expect(map.get(path.join(javaDir, "com/phenoml/api/resources/tools/mcpserver"))).toBe(
+            "mcpServer",
+        );
+        expect(map.get(path.join(javaDir, "com/phenoml/api/resources/tools"))).toBe("tools");
+    });
+
+    test("returns an empty map when the source directory is missing", () => {
+        expect(javaBuildAccessorMap(path.join(root, "does/not/exist")).size).toBe(0);
+    });
+
+    test("distinguishes duplicate Client basenames via package + imports", () => {
+        // The fixture has two `ToolsClient.java` files: the top-level one at
+        // resources/tools/, and a nested one at resources/tools/mcpserver/tools/.
+        // A basename-only index would collapse to one map entry and leave the
+        // other directory unmapped.
+        const map = javaBuildAccessorMap(javaDir);
+        expect(map.get(path.join(javaDir, "com/phenoml/api/resources/tools"))).toBe("tools");
+        expect(
+            map.get(path.join(javaDir, "com/phenoml/api/resources/tools/mcpserver/tools")),
+        ).toBe("tools");
+    });
 });
 
 describe("javaDeriveMethodChain", () => {
@@ -188,6 +252,43 @@ describe("javaDeriveMethodChain", () => {
         const chain = javaDeriveMethodChain(
             "/sdk/src/main/java/com/phenoml/api/resources/authtoken/auth/RawAuthClient.java",
             "/sdk/src/main/java/com/phenoml/api/resources",
+        );
+        expect(chain).toEqual(["authtoken", "auth"]);
+    });
+
+    test("remaps lowercased directory segments to camelCase accessor names via the map", () => {
+        const resourcesDir = "/sdk/src/main/java/com/phenoml/api/resources";
+        const accessorMap = new Map<string, string>([
+            [`${resourcesDir}/fhirprovider`, "fhirProvider"],
+        ]);
+        const chain = javaDeriveMethodChain(
+            `${resourcesDir}/fhirprovider/RawFhirProviderClient.java`,
+            resourcesDir,
+            accessorMap,
+        );
+        expect(chain).toEqual(["fhirProvider"]);
+    });
+
+    test("remaps nested segments independently, leaving already-matching segments alone", () => {
+        const resourcesDir = "/sdk/src/main/java/com/phenoml/api/resources";
+        const accessorMap = new Map<string, string>([
+            [`${resourcesDir}/tools`, "tools"],
+            [`${resourcesDir}/tools/mcpserver`, "mcpServer"],
+        ]);
+        const chain = javaDeriveMethodChain(
+            `${resourcesDir}/tools/mcpserver/RawMcpServerClient.java`,
+            resourcesDir,
+            accessorMap,
+        );
+        expect(chain).toEqual(["tools", "mcpServer"]);
+    });
+
+    test("falls back to the lowercased directory name when no accessor is registered", () => {
+        const resourcesDir = "/sdk/src/main/java/com/phenoml/api/resources";
+        const chain = javaDeriveMethodChain(
+            `${resourcesDir}/authtoken/auth/RawAuthClient.java`,
+            resourcesDir,
+            new Map(),
         );
         expect(chain).toEqual(["authtoken", "auth"]);
     });
@@ -351,6 +452,34 @@ describe("Java parser (AuthtokenAuth fixture)", () => {
         // SDK call source is preserved with chained calls
         expect(ex.sdkCallSource).toContain("client.authtoken()");
         expect(ex.sdkCallSource).toContain(".generateToken(");
+    });
+});
+
+describe("Java parser (accessor-map fixture)", () => {
+    const root = path.join(FIXTURES, "java-accessor");
+    const parser = createJavaParser();
+    const endpoints = parser.parseEndpoints(root);
+    const examples = parser.parseTestExamples(root);
+
+    test("emits camelCase accessor names in sdkMethodChain instead of lowercased dir names", () => {
+        const create = endpoints.find((e) => e.methodName === "create" && e.httpPath === "/fhir-provider");
+        expect(create).toBeDefined();
+        expect(create!.methodChain).toEqual(["fhirProvider", "create"]);
+    });
+
+    test("emits camelCase accessor names for nested resources", () => {
+        const create = endpoints.find((e) => e.methodName === "create" && e.httpPath === "/tools/mcp-server");
+        expect(create).toBeDefined();
+        expect(create!.methodChain).toEqual(["tools", "mcpServer", "create"]);
+    });
+
+    test("loads TestResources.loadResource() fixture contents into the response body", () => {
+        const ex = examples.find((e) => e.methodName === "create");
+        expect(ex).toBeDefined();
+        expect(ex!.responseBody).toMatchObject({
+            success: true,
+            message: "Fhir provider created successfully",
+        });
     });
 });
 
