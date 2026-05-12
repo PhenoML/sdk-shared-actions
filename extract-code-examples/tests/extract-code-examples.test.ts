@@ -838,6 +838,22 @@ describe("Java parser (accessor-map fixture)", () => {
     });
 });
 
+describe("Java parser (streaming-endpoint fixture)", () => {
+    const root = path.join(FIXTURES, "java-stream");
+    const endpoints = createJavaParser().parseEndpoints(root);
+
+    test("captures the path even when a later `client.newBuilder()` follows the URL builder", () => {
+        // `client.newBuilder().callTimeout(...).build()` appears after the
+        // URL builder in streaming endpoints; the path capture must survive it.
+        const streamChat = endpoints.find((e) => e.methodName === "streamChat");
+        expect(streamChat).toMatchObject({
+            httpMethod: "POST",
+            httpPath: "/agent/stream-chat",
+            methodChain: ["agent", "streamChat"],
+        });
+    });
+});
+
 describe("Java parser (multi-line signature fixture)", () => {
     const root = path.join(FIXTURES, "java-multiline");
     const endpoints = createJavaParser().parseEndpoints(root);
