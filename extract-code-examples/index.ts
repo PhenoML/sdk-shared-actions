@@ -25,6 +25,13 @@ interface EndpointMapping {
     httpPath: string; // OpenAPI-style template, e.g., /agent/{id}
     methodChain: string[]; // e.g., ["agent", "create"]
     methodName: string; // e.g., "create"
+    // Python-only: maps SDK kwarg name → JSON field name, derived from the
+    // raw client's `json={"jsonKey": kwargName, ...}` dict. Used both to
+    // exclude header/query/path kwargs from derived bodies and to emit the
+    // correct (possibly aliased) wire field names. Undefined for TS/Java
+    // (their parsers read body from a test literal) or when the raw client
+    // doesn't use a `json={...}` dict literal (e.g., `json=body_var`).
+    bodyParamMap?: Record<string, string>;
 }
 
 interface TestExample {
@@ -556,6 +563,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
         if (currentMethod && /self\._client_wrapper\.httpx_client\.(request|stream)\s*\(/.test(line)) {
             const httpPath = pyExtractRequestPath(lines, i);
             const httpMethod = pyExtractHttpMethod(lines, i);
+            const bodyParamMap = pyExtractBodyParamMap(lines, i);
 
             if (httpPath && httpMethod) {
                 // Also snake_case path-param names (Fern Python paths already
@@ -570,6 +578,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
                         httpPath: normalizedPath,
                         methodChain: [...chain, currentMethod],
                         methodName: currentMethod,
+                        ...(bodyParamMap !== null ? { bodyParamMap } : {}),
                     });
                 }
             }
@@ -593,12 +602,14 @@ function pyExtractRequestPath(lines: string[], startLine: number): string | null
     // It's the first positional argument, on the same line or next few lines.
     for (let i = startLine; i < Math.min(startLine + 5, lines.length); i++) {
         const line = lines[i].trim();
-        // f-string path: f"path/{jsonable_encoder(id)}"
+        // f-string path: f"path/{encode_path_param(id)}". Strip any single
+        // function wrapper around the param so the template uses just the
+        // bare name (matches the OpenAPI shape and the TS/Java parsers).
+        // Fern has used several wrapper names over time — jsonable_encoder,
+        // url_encode, encode_path_param — so match generically.
         const fMatch = line.match(/f"([^"]+)"/);
         if (fMatch) {
-            return fMatch[1]
-                .replace(/\{jsonable_encoder\((\w+)\)\}/g, "{$1}")
-                .replace(/\{url_encode\((\w+)\)\}/g, "{$1}");
+            return fMatch[1].replace(/\{\w+\((\w+)\)\}/g, "{$1}");
         }
         // Simple string path: "path/here"  (but not method="POST" or headers=)
         const simpleMatch = line.match(/^"([^"]+)"\s*,/);
@@ -612,6 +623,88 @@ function pyExtractHttpMethod(lines: string[], startLine: number): string | null 
         const match = lines[i].match(/method\s*=\s*"(\w+)"/);
         if (match) return match[1];
     }
+    return null;
+}
+
+// Scans the raw-client method body for `json={...}` and returns a map
+// of SDK kwarg name → JSON field name for each top-level entry of the
+// form `"<jsonField>": <kwarg>`. Fern sometimes aliases the wire field
+// (e.g., `"someField": some_field`), so we have to preserve both sides
+// — using just the kwarg name as the body key produces an HTTP body
+// that doesn't match what the SDK actually sends.
+//
+// Returns null when no `json={` dict literal is found, so callers can
+// fall back to their old heuristic for non-dict bodies (e.g., `json=body_var`).
+function pyExtractBodyParamMap(lines: string[], startLine: number): Record<string, string> | null {
+    const block = lines.slice(startLine, startLine + 100).join("\n");
+    const match = block.match(/\bjson\s*=\s*\{/);
+    if (!match) return null;
+    const map: Record<string, string> = {};
+    let depth = 0;
+    let lastKey: string | null = null;
+    let i = match.index! + match[0].length - 1; // at the `{`
+    while (i < block.length) {
+        const ch = block[i];
+        if (ch === '"' || ch === "'") {
+            const quote = ch;
+            const start = i + 1;
+            i++;
+            while (i < block.length) {
+                if (block[i] === "\\") { i += 2; continue; }
+                if (block[i] === quote) break;
+                i++;
+            }
+            // Only top-level strings between `,` and `:` are field-name keys.
+            if (depth === 1) lastKey = block.slice(start, i);
+            i++;
+            continue;
+        }
+        if (ch === "{" || ch === "[" || ch === "(") {
+            depth++;
+            lastKey = null; // entering a non-identifier value
+            i++;
+            continue;
+        }
+        if (ch === "}" || ch === "]" || ch === ")") {
+            depth--;
+            if (depth === 0) break;
+            i++;
+            continue;
+        }
+        if (depth === 1 && ch === ":" && lastKey !== null) {
+            const kwarg = pyUnwrapBodyValue(block.slice(i + 1));
+            if (kwarg !== null) map[kwarg] = lastKey;
+            lastKey = null;
+        } else if (depth === 1 && ch === ",") {
+            lastKey = null;
+        }
+        i++;
+    }
+    return map;
+}
+
+// Returns the SDK kwarg name that supplies the body field starting at
+// position 0 of `s` (i.e., the slice just after `:` in `json={...}`).
+// Handles three shapes Fern emits:
+//   1. Bare identifier:           `conv_config`           → "conv_config"
+//   2. Positional wrapper:        `jsonable_encoder(x)`   → "x"
+//   3. `object_=`-keyed wrapper:  `helper(object_=x, ...)` → "x"
+//      (e.g. `convert_and_respect_annotation_metadata`, used by current
+//       Fern for serialization metadata.)
+// Returns null when the value isn't an identifier (string/number literal)
+// or the wrapper's args have no recoverable kwarg — the caller drops the
+// entry rather than guessing wrong.
+function pyUnwrapBodyValue(s: string): string | null {
+    const ident = s.match(/^\s*([a-zA-Z_]\w*)/);
+    if (!ident) return null;
+    const after = s.slice(ident[0].length);
+    if (!after.startsWith("(")) return ident[1];
+    const inner = pyExtractArgsPortion(after);
+    if (inner === null) return null;
+    const objArg = inner.match(/\bobject_\s*=\s*([a-zA-Z_]\w*)/);
+    if (objArg) return objArg[1];
+    const positional = inner.match(/^\s*([a-zA-Z_]\w*)(?=\s*(?:,|$))/);
+    if (positional) return positional[1];
     return null;
 }
 
@@ -662,7 +755,7 @@ function pyExtractTestExamples(
                         if (isBalancedParens(sdkCallSource)) break;
                     }
                 }
-                sdkCallSource = sdkCallSource.trim();
+                sdkCallSource = truncateAfterMatchingParen(sdkCallSource).trim();
             }
         }
 
@@ -691,15 +784,158 @@ function pyExtractTestExamples(
                 httpPath,
                 methodName,
                 describeBlock: "",
+                // requestBody is derived from kwargs in buildManifest where
+                // the path template (and therefore path-param names) is known.
                 requestBody: null,
                 responseBody,
-                sdkCallArgs: [],
+                sdkCallArgs: sdkCallSource ? pyParseKwargs(sdkCallSource) : [],
                 sdkCallSource,
             });
         }
     }
 
     return examples;
+}
+
+// Hand-rolled because Node has no Python AST. Naive about exotic Python
+// (single-quoted strings work, but f-strings, triple-quoted strings, and
+// concatenated literals aren't handled) — fine for Fern-generated test
+// bodies, which only ever use plain literal kwargs.
+function pyParseKwargs(callSource: string): Array<{ name: string; value: unknown }> {
+    const portion = pyExtractArgsPortion(callSource);
+    if (portion === null) return [];
+    const out: Array<{ name: string; value: unknown }> = [];
+    for (const piece of pySplitTopLevel(portion)) {
+        const eq = pyFindTopLevelEquals(piece);
+        if (eq < 0) continue; // positional arg — Fern tests don't use these
+        const name = piece.slice(0, eq).trim();
+        if (!/^\w+$/.test(name)) continue;
+        out.push({ name, value: pyParseValue(piece.slice(eq + 1)) });
+    }
+    return out;
+}
+
+// Iterates `s` yielding each character outside of Python string literals,
+// along with the current nesting depth across `()`, `[]`, and `{}`. Single-
+// and double-quoted strings are skipped with backslash-escape awareness.
+// `depth` reflects the value AFTER any bracket update for the yielded char,
+// so the outermost `)` of a balanced call is yielded with depth 0.
+function* pyWalkTopLevel(s: string): Generator<{ ch: string; i: number; depth: number }> {
+    let depth = 0;
+    let inString = false;
+    let quote = "";
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < s.length) { i++; continue; }
+            if (ch === quote) inString = false;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; continue; }
+        if (ch === "(" || ch === "[" || ch === "{") depth++;
+        else if (ch === ")" || ch === "]" || ch === "}") depth--;
+        yield { ch, i, depth };
+    }
+}
+
+function pyExtractArgsPortion(callSource: string): string | null {
+    const open = callSource.indexOf("(");
+    if (open < 0) return null;
+    for (const { ch, i, depth } of pyWalkTopLevel(callSource.slice(open))) {
+        if (ch === ")" && depth === 0) return callSource.slice(open + 1, open + i);
+    }
+    return null;
+}
+
+function pySplitTopLevel(s: string): string[] {
+    const out: string[] = [];
+    let start = 0;
+    for (const { ch, i, depth } of pyWalkTopLevel(s)) {
+        if (ch === "," && depth === 0) {
+            const part = s.slice(start, i).trim();
+            if (part) out.push(part);
+            start = i + 1;
+        }
+    }
+    const tail = s.slice(start).trim();
+    if (tail) out.push(tail);
+    return out;
+}
+
+// Skips `==` so comparison expressions aren't mistaken for assignment.
+function pyFindTopLevelEquals(s: string): number {
+    for (const { ch, i, depth } of pyWalkTopLevel(s)) {
+        if (ch === "=" && depth === 0 && s[i + 1] !== "=") return i;
+    }
+    return -1;
+}
+
+function pyParseValue(s: string): unknown {
+    const trimmed = s.trim();
+    if (!trimmed) return undefined;
+    try {
+        return JSON.parse(stripTrailingCommas(pyToJsonLiteral(trimmed)));
+    } catch {
+        return `<expr:${trimmed}>`;
+    }
+}
+
+// Removes any `,` that precedes `]` or `}` (with optional whitespace between).
+// Python allows — and Black formats multi-line lists/dicts with — trailing
+// commas; JSON.parse rejects them, so without this strip every multi-line
+// kwarg value would fall through to the `<expr:...>` escape hatch.
+// String-literal aware so commas inside quoted values are preserved.
+function stripTrailingCommas(s: string): string {
+    let out = "";
+    let inString = false;
+    let quote = "";
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < s.length) { out += ch + s[i + 1]; i++; continue; }
+            if (ch === quote) inString = false;
+            out += ch;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; out += ch; continue; }
+        if (ch === ",") {
+            let j = i + 1;
+            while (j < s.length && /\s/.test(s[j])) j++;
+            if (j < s.length && (s[j] === "]" || s[j] === "}")) continue;
+        }
+        out += ch;
+    }
+    return out;
+}
+
+// Translates bare Python True/False/None to true/false/null so JSON.parse
+// can read the result. Skips matches inside string literals and matches
+// adjacent to word characters (e.g. `TrueOrFalse` is left alone).
+function pyToJsonLiteral(s: string): string {
+    let out = "";
+    let inString = false;
+    let quote = "";
+    let i = 0;
+    while (i < s.length) {
+        const ch = s[i];
+        if (inString) {
+            if (ch === "\\" && i + 1 < s.length) { out += ch + s[i + 1]; i += 2; continue; }
+            if (ch === quote) inString = false;
+            out += ch;
+            i++;
+            continue;
+        }
+        if (ch === '"' || ch === "'") { inString = true; quote = ch; out += ch; i++; continue; }
+        const prev = i > 0 ? s[i - 1] : "";
+        if (!/\w/.test(prev)) {
+            if (s.startsWith("True", i) && !/\w/.test(s[i + 4] ?? "")) { out += "true"; i += 4; continue; }
+            if (s.startsWith("False", i) && !/\w/.test(s[i + 5] ?? "")) { out += "false"; i += 5; continue; }
+            if (s.startsWith("None", i) && !/\w/.test(s[i + 4] ?? "")) { out += "null"; i += 4; continue; }
+        }
+        out += ch;
+        i++;
+    }
+    return out;
 }
 
 // ============================================================
@@ -1191,6 +1427,20 @@ function isBalancedParens(str: string): boolean {
     return depth === 0;
 }
 
+// Naive about strings/comments — same trade-off as isBalancedParens, which
+// is fine for Fern-generated test bodies (no parens-in-strings in args).
+// Drops trailing punctuation when the SDK call appears in a compound
+// statement like `for _ in client.foo(...):` — the regex captures the `:`
+// from the `for` header along with the call.
+function truncateAfterMatchingParen(s: string): string {
+    let depth = 0;
+    for (let i = 0; i < s.length; i++) {
+        if (s[i] === "(") depth++;
+        else if (s[i] === ")" && --depth === 0) return s.slice(0, i + 1);
+    }
+    return s;
+}
+
 // True if `concretePath` matches `templatePath` segment-by-segment, treating
 // any "{name}" segment in the template as a wildcard. e.g. "/agent/{id}"
 // matches "/agent/abc123".
@@ -1219,6 +1469,57 @@ function findTemplateMatch(
         if (pathMatchesTemplate(endpoint.httpPath, concretePath)) return endpoint;
     }
     return undefined;
+}
+
+// When `endpoint.bodyParamMap` is set (extracted from the raw client's
+// `json={...}` dict), use it both to exclude header/query/path kwargs
+// AND to translate the kwarg name back to the JSON field name (Fern
+// sometimes aliases, e.g., `"someField": some_field`). Otherwise fall
+// back to "everything except path params" with the kwarg name used as
+// the body key — imperfect (header/query kwargs leak; aliased fields
+// emit the wrong key) but the best we can do without raw-client info.
+function deriveBodyFromKwargs(
+    endpoint: EndpointMapping,
+    sdkCallArgs: unknown[],
+): unknown | null {
+    if (!["POST", "PUT", "PATCH"].includes(endpoint.httpMethod)) return null;
+    const resolveKey = bodyKeyResolver(endpoint);
+    const body: Record<string, unknown> = {};
+    let count = 0;
+    for (const arg of sdkCallArgs) {
+        if (!arg || typeof arg !== "object" || !("name" in arg) || !("value" in arg)) continue;
+        const { name, value } = arg as { name: unknown; value: unknown };
+        if (typeof name !== "string") continue;
+        const key = resolveKey(name);
+        if (key === null) continue;
+        body[key] = value;
+        count++;
+    }
+    return count > 0 ? body : null;
+}
+
+// Returns a function mapping an SDK kwarg name to its body field name,
+// or null if the kwarg shouldn't be in the body at all.
+// Counts how many of {body, sdkCallArgs, responseBody, sdkCallSource}
+// carry data. Used to decide which of two examples for the same endpoint
+// should land in the manifest — higher score wins, ties keep the first.
+function codeExampleRichness(ex: CodeExample): number {
+    let score = 0;
+    if (ex.request.body !== null) score++;
+    if (ex.request.sdkCallArgs.length > 0) score++;
+    if (ex.response.body !== null) score++;
+    if (ex.sdkCallSource) score++;
+    return score;
+}
+
+function bodyKeyResolver(endpoint: EndpointMapping): (name: string) => string | null {
+    if (endpoint.bodyParamMap !== undefined) {
+        const map = endpoint.bodyParamMap;
+        return (name) => (Object.prototype.hasOwnProperty.call(map, name) ? map[name] : null);
+    }
+    const pathParams = new Set<string>();
+    for (const m of endpoint.httpPath.matchAll(/\{(\w+)\}/g)) pathParams.add(m[1]);
+    return (name) => (pathParams.has(name) ? null : name);
 }
 
 function buildManifest(
@@ -1279,15 +1580,25 @@ function buildManifest(
 
         if (endpoint) {
             const key = `${endpoint.httpMethod} ${endpoint.httpPath}`;
-            manifest.examples[key] = {
+            const body = example.requestBody ?? deriveBodyFromKwargs(endpoint, example.sdkCallArgs);
+            const candidate: CodeExample = {
                 httpMethod: endpoint.httpMethod,
                 httpPath: endpoint.httpPath,
                 sdkMethodChain: endpoint.methodChain,
                 sdkMethodName: endpoint.methodName,
-                request: { body: example.requestBody, sdkCallArgs: example.sdkCallArgs },
+                request: { body, sdkCallArgs: example.sdkCallArgs },
                 response: { body: example.responseBody },
                 sdkCallSource: example.sdkCallSource,
             };
+            // Multiple wire tests can target the same endpoint (success +
+            // variants, or — like the python fixture — a test that omits
+            // kwargs to exercise an unrelated parser path). Prefer the
+            // richer entry so an emptier later test can't erase a body or
+            // call-args populated by an earlier one.
+            const existing = manifest.examples[key];
+            if (!existing || codeExampleRichness(candidate) > codeExampleRichness(existing)) {
+                manifest.examples[key] = candidate;
+            }
             matched++;
         } else {
             console.error(`  WARNING: No endpoint match for test: ${exactKey}`);
@@ -1403,6 +1714,7 @@ export {
     createJavaParser,
     createPythonParser,
     createTypeScriptParser,
+    deriveBodyFromKwargs,
     findTemplateMatch,
     isBalancedParens,
     javaBuildAccessorMap,
@@ -1416,10 +1728,13 @@ export {
     normalizePath,
     normalizePathParams,
     pyDeriveMethodChain,
+    pyExtractBodyParamMap,
     pyExtractEndpoints,
     pyExtractHttpMethod,
     pyExtractRequestPath,
     pyExtractTestExamples,
+    pyParseKwargs,
+    truncateAfterMatchingParen,
     tsExtractEndpoints,
     tsExtractTestExamples,
 };
