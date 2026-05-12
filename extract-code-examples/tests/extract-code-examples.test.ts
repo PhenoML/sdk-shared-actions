@@ -17,7 +17,7 @@ import {
     normalizePath,
     normalizePathParams,
     pyDeriveMethodChain,
-    pyExtractBodyParamNames,
+    pyExtractBodyParamMap,
     pyExtractHttpMethod,
     pyExtractRequestPath,
     pyParseKwargs,
@@ -379,8 +379,8 @@ describe("pyExtractHttpMethod", () => {
     });
 });
 
-describe("pyExtractBodyParamNames", () => {
-    test("collects identifier values from a multi-line `json={...}` dict", () => {
+describe("pyExtractBodyParamMap", () => {
+    test("maps kwarg name → JSON field name for each top-level entry", () => {
         const lines = [
             "self._client_wrapper.httpx_client.request(",
             '    "agent/stream-chat",',
@@ -394,35 +394,48 @@ describe("pyExtractBodyParamNames", () => {
             "    },",
             ")",
         ];
-        // header identifiers must NOT appear in the result, even though
-        // they look identical syntactically — they live in a sibling
-        // `headers={...}` dict, which the walker exits via depth=0.
-        expect(pyExtractBodyParamNames(lines, 0)).toEqual(["message", "agent_id"]);
+        // Header identifiers must NOT appear in the map — they live in a
+        // sibling `headers={...}` dict, which the walker exits via depth=0.
+        expect(pyExtractBodyParamMap(lines, 0)).toEqual({
+            message: "message",
+            agent_id: "agent_id",
+        });
+    });
+    test("preserves aliased JSON field names distinct from kwarg names", () => {
+        // Fern aliases (e.g., snake_case kwarg → camelCase wire field).
+        // The map must keep the wire side so the manifest reports the
+        // actual HTTP body shape, not the SDK call's local names.
+        const lines = [
+            "    json={",
+            '        "someField": some_field,',
+            '        "anotherWireKey": another_kwarg,',
+            "    },",
+        ];
+        expect(pyExtractBodyParamMap(lines, 0)).toEqual({
+            some_field: "someField",
+            another_kwarg: "anotherWireKey",
+        });
     });
     test("ignores nested-dict sub-fields (depth > 1)", () => {
-        // Fern's normal shape passes identifier values (`"name": name`),
-        // so we capture from depth 1 only. A nested dict literal at
-        // depth 2 must not leak its identifiers into the body set.
         const lines = [
-            "self._client_wrapper.httpx_client.request(",
             "    json={",
             '        "name": name,',
             '        "extra": {',
             '            "key": should_not_appear,',
             "        },",
+            '        "after": after_kwarg,',
             "    },",
-            ")",
         ];
-        expect(pyExtractBodyParamNames(lines, 0)).toEqual(["name"]);
+        expect(pyExtractBodyParamMap(lines, 0)).toEqual({ name: "name", after_kwarg: "after" });
     });
     test("returns null when no `json={` dict literal is present", () => {
         // GET endpoints have no `json=` arg; `json=body_var` (non-literal)
         // also returns null so callers fall back to the old heuristic.
-        expect(pyExtractBodyParamNames(["self._client_wrapper.httpx_client.request(", '    "foo",', ")"], 0)).toBeNull();
-        expect(pyExtractBodyParamNames(["    json=body_var,"], 0)).toBeNull();
+        expect(pyExtractBodyParamMap(["self._client_wrapper.httpx_client.request(", '    "foo",', ")"], 0)).toBeNull();
+        expect(pyExtractBodyParamMap(["    json=body_var,"], 0)).toBeNull();
     });
-    test("returns empty list for an empty `json={}`", () => {
-        expect(pyExtractBodyParamNames(["    json={},"], 0)).toEqual([]);
+    test("returns empty map for an empty `json={}`", () => {
+        expect(pyExtractBodyParamMap(["    json={},"], 0)).toEqual({});
     });
 });
 
@@ -504,7 +517,7 @@ describe("pyParseKwargs", () => {
 });
 
 describe("deriveBodyFromKwargs", () => {
-    function endpoint(over: Partial<{ httpMethod: string; httpPath: string; bodyParamNames?: string[] }>) {
+    function endpoint(over: Partial<{ httpMethod: string; httpPath: string; bodyParamMap?: Record<string, string> }>) {
         return {
             httpMethod: "POST",
             httpPath: "/foo",
@@ -519,29 +532,43 @@ describe("deriveBodyFromKwargs", () => {
         expect(deriveBodyFromKwargs(endpoint({ httpMethod: "GET", httpPath: "/agent/{id}" }), args)).toBeNull();
         expect(deriveBodyFromKwargs(endpoint({ httpMethod: "DELETE", httpPath: "/agent/{id}" }), args)).toBeNull();
     });
-    test("uses bodyParamNames as a positive allowlist when set, excluding headers/query/path kwargs", () => {
-        // Mirrors the streaming-endpoint shape: a POST with a body kwarg
-        // (`message`) plus a header kwarg (`phenoml_on_behalf_of`). Only
-        // the body kwarg must end up in `request.body`.
+    test("uses bodyParamMap as an allowlist, excluding headers/query/path kwargs", () => {
+        // Mirrors the streaming-endpoint shape: a POST with body kwargs
+        // (`message`, `agent_id`) plus a header kwarg (`phenoml_on_behalf_of`).
+        // Only the body kwargs must end up in `request.body`.
         const args = [
             { name: "phenoml_on_behalf_of", value: "user@example.com" },
             { name: "message", value: "hi" },
             { name: "agent_id", value: "agent-123" },
         ];
         const result = deriveBodyFromKwargs(
-            endpoint({ httpPath: "/agent/stream-chat", bodyParamNames: ["message", "agent_id"] }),
+            endpoint({
+                httpPath: "/agent/stream-chat",
+                bodyParamMap: { message: "message", agent_id: "agent_id" },
+            }),
             args,
         );
         expect(result).toEqual({ message: "hi", agent_id: "agent-123" });
     });
-    test("returns null when bodyParamNames is empty (no `json={...}` body)", () => {
-        const args = [{ name: "id", value: "x" }];
-        expect(deriveBodyFromKwargs(endpoint({ bodyParamNames: [] }), args)).toBeNull();
+    test("emits aliased JSON field names from bodyParamMap rather than kwarg names", () => {
+        // The reviewer's case: Fern maps `some_field` (kwarg) → `someField`
+        // (wire field). The body must use the wire key — that's what the
+        // SDK actually sends over HTTP and what the manifest documents.
+        const args = [{ name: "some_field", value: "v" }];
+        const result = deriveBodyFromKwargs(
+            endpoint({ bodyParamMap: { some_field: "someField" } }),
+            args,
+        );
+        expect(result).toEqual({ someField: "v" });
     });
-    test("falls back to path-param exclusion when bodyParamNames is undefined", () => {
+    test("returns null when bodyParamMap is empty (no `json={...}` body)", () => {
+        const args = [{ name: "id", value: "x" }];
+        expect(deriveBodyFromKwargs(endpoint({ bodyParamMap: {} }), args)).toBeNull();
+    });
+    test("falls back to path-param exclusion when bodyParamMap is undefined", () => {
         // Used for endpoints whose raw client doesn't have a `json={...}`
         // dict literal (rare in practice). Still leaks header/query kwargs
-        // but is better than emitting null.
+        // and can't honor field-name aliases — better than emitting null.
         const args = [
             { name: "id", value: "agent-123" },
             { name: "name", value: "new-name" },

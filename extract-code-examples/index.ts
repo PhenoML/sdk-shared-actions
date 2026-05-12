@@ -25,12 +25,13 @@ interface EndpointMapping {
     httpPath: string; // OpenAPI-style template, e.g., /agent/{id}
     methodChain: string[]; // e.g., ["agent", "create"]
     methodName: string; // e.g., "create"
-    // Python-only: kwarg names that map to body fields (the values of the
-    // raw client's `json={...}` dict). Used to exclude header/query/path
-    // kwargs from derived bodies. Undefined for TS/Java (their parsers
-    // read body directly from a test literal) or when the raw client
+    // Python-only: maps SDK kwarg name → JSON field name, derived from the
+    // raw client's `json={"jsonKey": kwargName, ...}` dict. Used both to
+    // exclude header/query/path kwargs from derived bodies and to emit the
+    // correct (possibly aliased) wire field names. Undefined for TS/Java
+    // (their parsers read body from a test literal) or when the raw client
     // doesn't use a `json={...}` dict literal (e.g., `json=body_var`).
-    bodyParamNames?: string[];
+    bodyParamMap?: Record<string, string>;
 }
 
 interface TestExample {
@@ -562,7 +563,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
         if (currentMethod && /self\._client_wrapper\.httpx_client\.(request|stream)\s*\(/.test(line)) {
             const httpPath = pyExtractRequestPath(lines, i);
             const httpMethod = pyExtractHttpMethod(lines, i);
-            const bodyParamNames = pyExtractBodyParamNames(lines, i);
+            const bodyParamMap = pyExtractBodyParamMap(lines, i);
 
             if (httpPath && httpMethod) {
                 // Also snake_case path-param names (Fern Python paths already
@@ -577,7 +578,7 @@ function pyExtractEndpoints(filePath: string, pkgRoot: string): EndpointMapping[
                         httpPath: normalizedPath,
                         methodChain: [...chain, currentMethod],
                         methodName: currentMethod,
-                        ...(bodyParamNames !== null ? { bodyParamNames } : {}),
+                        ...(bodyParamMap !== null ? { bodyParamMap } : {}),
                     });
                 }
             }
@@ -625,44 +626,61 @@ function pyExtractHttpMethod(lines: string[], startLine: number): string | null 
     return null;
 }
 
-// Scans the raw-client method body for `json={...}` and returns the
-// identifiers that appear as VALUES at the top level of that dict — i.e.
-// the SDK kwarg names that become body fields. Returns null when no
-// `json={` dict literal is found, so callers can fall back to their old
-// heuristic for non-dict bodies (e.g., `json=body_var`).
-function pyExtractBodyParamNames(lines: string[], startLine: number): string[] | null {
+// Scans the raw-client method body for `json={...}` and returns a map
+// of SDK kwarg name → JSON field name for each top-level entry of the
+// form `"<jsonField>": <kwarg>`. Fern sometimes aliases the wire field
+// (e.g., `"someField": some_field`), so we have to preserve both sides
+// — using just the kwarg name as the body key produces an HTTP body
+// that doesn't match what the SDK actually sends.
+//
+// Returns null when no `json={` dict literal is found, so callers can
+// fall back to their old heuristic for non-dict bodies (e.g., `json=body_var`).
+function pyExtractBodyParamMap(lines: string[], startLine: number): Record<string, string> | null {
     const block = lines.slice(startLine, startLine + 100).join("\n");
     const match = block.match(/\bjson\s*=\s*\{/);
     if (!match) return null;
-    const names: string[] = [];
+    const map: Record<string, string> = {};
     let depth = 0;
-    // Walk from the `{` (last char of the match) to its closing `}`. Only
-    // capture identifiers at depth 1 — sub-dicts and sub-lists are part of
-    // a single body field's value, not separate fields.
-    for (let i = match.index! + match[0].length - 1; i < block.length; i++) {
+    let lastKey: string | null = null;
+    let i = match.index! + match[0].length - 1; // at the `{`
+    while (i < block.length) {
         const ch = block[i];
         if (ch === '"' || ch === "'") {
             const quote = ch;
+            const start = i + 1;
             i++;
             while (i < block.length) {
                 if (block[i] === "\\") { i += 2; continue; }
                 if (block[i] === quote) break;
                 i++;
             }
+            // Only top-level strings between `,` and `:` are field-name keys.
+            if (depth === 1) lastKey = block.slice(start, i);
+            i++;
             continue;
         }
-        if (ch === "{" || ch === "[" || ch === "(") { depth++; continue; }
+        if (ch === "{" || ch === "[" || ch === "(") {
+            depth++;
+            lastKey = null; // entering a non-identifier value
+            i++;
+            continue;
+        }
         if (ch === "}" || ch === "]" || ch === ")") {
             depth--;
             if (depth === 0) break;
+            i++;
             continue;
         }
-        if (depth === 1 && ch === ":") {
+        if (depth === 1 && ch === ":" && lastKey !== null) {
             const tail = block.slice(i + 1).match(/^\s*([a-zA-Z_]\w*)/);
-            if (tail) names.push(tail[1]);
+            if (tail) map[tail[1]] = lastKey;
+            lastKey = null;
+        } else if (depth === 1 && ch === ",") {
+            lastKey = null;
         }
+        i++;
     }
-    return names;
+    return map;
 }
 
 function pyExtractTestExamples(
@@ -1428,37 +1446,43 @@ function findTemplateMatch(
     return undefined;
 }
 
-// When `endpoint.bodyParamNames` is set (extracted from the raw client's
-// `json={...}` dict), use it as a precise allowlist so header/query/path
-// kwargs are excluded. Otherwise fall back to "everything except path
-// params" — imperfect (header/query kwargs leak into the body) but the
-// best we can do without raw-client info.
+// When `endpoint.bodyParamMap` is set (extracted from the raw client's
+// `json={...}` dict), use it both to exclude header/query/path kwargs
+// AND to translate the kwarg name back to the JSON field name (Fern
+// sometimes aliases, e.g., `"someField": some_field`). Otherwise fall
+// back to "everything except path params" with the kwarg name used as
+// the body key — imperfect (header/query kwargs leak; aliased fields
+// emit the wrong key) but the best we can do without raw-client info.
 function deriveBodyFromKwargs(
     endpoint: EndpointMapping,
     sdkCallArgs: unknown[],
 ): unknown | null {
     if (!["POST", "PUT", "PATCH"].includes(endpoint.httpMethod)) return null;
-    const accept = bodyKwargFilter(endpoint);
+    const resolveKey = bodyKeyResolver(endpoint);
     const body: Record<string, unknown> = {};
     let count = 0;
     for (const arg of sdkCallArgs) {
         if (!arg || typeof arg !== "object" || !("name" in arg) || !("value" in arg)) continue;
         const { name, value } = arg as { name: unknown; value: unknown };
-        if (typeof name !== "string" || !accept(name)) continue;
-        body[name] = value;
+        if (typeof name !== "string") continue;
+        const key = resolveKey(name);
+        if (key === null) continue;
+        body[key] = value;
         count++;
     }
     return count > 0 ? body : null;
 }
 
-function bodyKwargFilter(endpoint: EndpointMapping): (name: string) => boolean {
-    if (endpoint.bodyParamNames !== undefined) {
-        const allow = new Set(endpoint.bodyParamNames);
-        return (name) => allow.has(name);
+// Returns a function mapping an SDK kwarg name to its body field name,
+// or null if the kwarg shouldn't be in the body at all.
+function bodyKeyResolver(endpoint: EndpointMapping): (name: string) => string | null {
+    if (endpoint.bodyParamMap !== undefined) {
+        const map = endpoint.bodyParamMap;
+        return (name) => (Object.prototype.hasOwnProperty.call(map, name) ? map[name] : null);
     }
     const pathParams = new Set<string>();
     for (const m of endpoint.httpPath.matchAll(/\{(\w+)\}/g)) pathParams.add(m[1]);
-    return (name) => !pathParams.has(name);
+    return (name) => (pathParams.has(name) ? null : name);
 }
 
 function buildManifest(
@@ -1658,7 +1682,7 @@ export {
     normalizePath,
     normalizePathParams,
     pyDeriveMethodChain,
-    pyExtractBodyParamNames,
+    pyExtractBodyParamMap,
     pyExtractEndpoints,
     pyExtractHttpMethod,
     pyExtractRequestPath,
