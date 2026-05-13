@@ -866,12 +866,13 @@ describe("TypeScript parser (Summary client fixture)", () => {
     const endpoints = parser.parseEndpoints(root);
     const examples = parser.parseTestExamples(root);
 
-    test("parseEndpoints extracts all 6 Summary endpoints", () => {
+    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming endpoint", () => {
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /fhir2summary/template/{id}",
             "GET /fhir2summary/template/{id}",
             "GET /fhir2summary/templates",
+            "POST /agent/stream-chat",
             "POST /fhir2summary/create",
             "POST /fhir2summary/template",
             "PUT /fhir2summary/template/{id}",
@@ -884,10 +885,10 @@ describe("TypeScript parser (Summary client fixture)", () => {
     });
 
     test("parseTestExamples extracts only (1) variants of each test", () => {
-        // The Summary fixture has 6 methods, each with several numbered variants
-        // ((1) success, (2)/(3) error cases). Only the (1) success cases should
-        // be extracted.
-        expect(examples).toHaveLength(6);
+        // The Summary fixture has 6 methods + the agent streamChat fixture,
+        // each with several numbered variants ((1) success, (2)/(3) error
+        // cases). Only the (1) success cases should be extracted.
+        expect(examples).toHaveLength(7);
         expect(examples.every((e) => e.httpMethod && e.httpPath)).toBe(true);
     });
 
@@ -905,6 +906,32 @@ describe("TypeScript parser (Summary client fixture)", () => {
         });
         // The SDK call's single object arg also flows into sdkCallArgs.
         expect(createTemplate!.sdkCallArgs).toHaveLength(1);
+    });
+
+    test("parseEndpoints flags methods returning `core.Stream<...>` as streaming", () => {
+        const streamChat = endpoints.find((e) => e.methodName === "streamChat");
+        expect(streamChat?.isStreaming).toBe(true);
+    });
+
+    test("parseEndpoints leaves non-streaming endpoints' isStreaming undefined", () => {
+        const createTemplate = endpoints.find((e) => e.methodName === "createTemplate");
+        expect(createTemplate?.isStreaming).toBeUndefined();
+    });
+
+    test("buildManifest replaces an SSE endpoint's mock body with `{ body: null, streaming: true }`", () => {
+        // Wire tests for SSE endpoints use `.sseBody("event: ...\ndata: ...\n\n")`
+        // which would otherwise leak the raw wire string into `response.body`.
+        // With isStreaming set, manifest.ts drops the placeholder.
+        const metadata = {
+            generatorName: "fernapi/fern-typescript-sdk",
+            sdkVersion: "0.0.0",
+            originGitCommit: "deadbeef",
+        };
+        const manifest = buildManifest(endpoints, examples, "typescript", "pkg", metadata);
+        expect(manifest.examples["POST /agent/stream-chat"].response).toEqual({
+            body: null,
+            streaming: true,
+        });
     });
 });
 
