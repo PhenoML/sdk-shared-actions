@@ -54,4 +54,25 @@ public class RawThingClient {
                 .build();
         return execute(okhttpRequest);
     }
+
+    // Multi-line signature with one parameter per line: the body's `{` only
+    // appears on line 5. Each parameter line stays at the class-body brace
+    // depth, so the method-exit check must distinguish "signature still open"
+    // from "body closed."
+    public PhenomlClientHttpResponse<Response> getThingById(
+            String codesystem,
+            String codeId,
+            RequestBody request,
+            RequestOptions requestOptions) {
+        HttpUrl.Builder httpUrl = HttpUrl.parse(this.clientOptions.environment().getUrl())
+                .newBuilder()
+                .addPathSegments("things")
+                .addPathSegment(codesystem)
+                .addPathSegment(codeId);
+        Request okhttpRequest = new Request.Builder()
+                .url(httpUrl.build())
+                .method("GET", null)
+                .build();
+        return execute(okhttpRequest);
+    }
 }
