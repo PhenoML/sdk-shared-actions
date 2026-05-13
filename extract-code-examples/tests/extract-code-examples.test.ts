@@ -909,8 +909,21 @@ describe("Python parser (Authtoken auth fixture)", () => {
             (e) => e.httpMethod === "POST" && e.httpPath === "/v2/auth/token" && e.sdkCallSource.includes("client.authtoken.auth.get_token"),
         );
         expect(longBody).toBeDefined();
-        // Both test files should yield an example (no truncation drops one).
-        expect(examples.filter((e) => e.httpPath === "/v2/auth/token").length).toBe(2);
+        // Every fixture targeting /v2/auth/token should yield an example:
+        // test_authtoken_auth.py, test_long_body.py, and the two wrapped
+        // tests in test_multiline_verify.py (no truncation drops any).
+        expect(examples.filter((e) => e.httpPath === "/v2/auth/token").length).toBe(4);
+    });
+
+    test("parseTestExamples handles multi-line verify_request_count calls", () => {
+        // Black wraps long calls across multiple lines; the single-line
+        // regex used to drop both wrapped forms. Confirm both shapes from
+        // test_multiline_verify.py are extracted with the correct method
+        // and path.
+        const wrappedA = examples.find((e) => e.methodName === "auth_get_token_wrapped_inline");
+        const wrappedB = examples.find((e) => e.methodName === "auth_get_token_wrapped_per_arg");
+        expect(wrappedA).toMatchObject({ httpMethod: "POST", httpPath: "/v2/auth/token" });
+        expect(wrappedB).toMatchObject({ httpMethod: "POST", httpPath: "/v2/auth/token" });
     });
 
     test("parseTestExamples strips the `for _ in ...:` wrapper from streaming tests", () => {
