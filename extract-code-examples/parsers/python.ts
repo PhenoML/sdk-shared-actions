@@ -533,11 +533,112 @@ function pyFindTopLevelEquals(s: string): number {
 function pyParseValue(s: string): unknown {
     const trimmed = s.trim();
     if (!trimmed) return undefined;
+    const direct = tryJsonParseValue(trimmed);
+    if (direct !== PARSE_FAILED) return direct;
+    const transformed = tryJsonParseValue(pyConvertClassConstructors(trimmed));
+    if (transformed !== PARSE_FAILED) return transformed;
+    return `<expr:${trimmed}>`;
+}
+
+// Sentinel for parse failure. JSON.parse never returns a Symbol, so this
+// safely distinguishes "no parse" from a legitimate null/undefined result.
+const PARSE_FAILED: unique symbol = Symbol("parse-failed");
+
+function tryJsonParseValue(s: string): unknown | typeof PARSE_FAILED {
     try {
-        return JSON.parse(stripTrailingCommas(pyToJsonLiteral(trimmed)));
+        return JSON.parse(stripTrailingCommas(pyToJsonLiteral(s)));
     } catch {
-        return `<expr:${trimmed}>`;
+        return PARSE_FAILED;
     }
+}
+
+// Rewrites Python class-constructor expressions inside a value string as
+// JSON-compatible object literals: `Foo(a=1, b="x")` → `{"a": 1, "b": "x"}`.
+// Recurses into nested constructors, lists, and dicts so values like
+// `[Foo(a=Bar(b=2))]` become `[{"a": {"b": 2}}]`.
+//
+// Discriminated-union variants (e.g., `FhirProviderCreateRequestAuth_ClientSecret`)
+// lose their discriminator field because the property name lives in the
+// schema, not the Python source. The kwargs themselves are preserved — an
+// incomplete but usable body shape, better than a sentinel.
+function pyConvertClassConstructors(s: string): string {
+    let out = "";
+    let i = 0;
+    while (i < s.length) {
+        const ch = s[i];
+        if (ch === '"' || ch === "'") {
+            const start = i;
+            const quote = ch;
+            i++;
+            while (i < s.length) {
+                if (s[i] === "\\" && i + 1 < s.length) { i += 2; continue; }
+                if (s[i] === quote) { i++; break; }
+                i++;
+            }
+            out += s.slice(start, i);
+            continue;
+        }
+        const replacement = pyTryConvertCallAt(s, i);
+        if (replacement) {
+            out += replacement.text;
+            i = replacement.nextIdx;
+            continue;
+        }
+        out += ch;
+        i++;
+    }
+    return out;
+}
+
+// If `s[i]` begins a `ClassName(...)` constructor call (PascalCase identifier,
+// preceded by a non-identifier char), returns the JSON-object rewrite plus the
+// index just past the closing `)`. Returns null when this position isn't the
+// start of a convertible call.
+function pyTryConvertCallAt(
+    s: string,
+    i: number,
+): { text: string; nextIdx: number } | null {
+    // Fast path: only PascalCase identifiers can start a class constructor.
+    // Avoids the substring + regex match at every non-identifier boundary.
+    if (s[i] < "A" || s[i] > "Z") return null;
+    const prev = i > 0 ? s[i - 1] : "";
+    // Skip member access (`module.Foo(`) and identifier suffixes (`xFoo(`).
+    if (/[\w.]/.test(prev)) return null;
+    const m = s.slice(i).match(/^([A-Z][\w]*)\(/);
+    if (!m) return null;
+    const openIdx = i + m[1].length;
+    const closeIdx = pyFindMatchingCloseParen(s, openIdx);
+    if (closeIdx <= openIdx) return null;
+    const inner = s.slice(openIdx + 1, closeIdx);
+    const converted = pyConvertConstructorArgs(inner);
+    if (converted === null) return null;
+    return { text: "{" + converted + "}", nextIdx: closeIdx + 1 };
+}
+
+// Splits the args portion of a class constructor by top-level commas and
+// renders each `name=value` as a JSON entry. Returns null if any arg is
+// positional or the kwarg name isn't a bare identifier — the caller then
+// leaves the expression untouched so JSON.parse fails cleanly into the
+// `<expr:...>` fallback rather than producing partial garbage.
+function pyConvertConstructorArgs(inner: string): string | null {
+    const parts = pySplitTopLevel(inner);
+    const out: string[] = [];
+    for (const part of parts) {
+        const eq = pyFindTopLevelEquals(part);
+        if (eq < 0) return null;
+        const name = part.slice(0, eq).trim();
+        if (!/^\w+$/.test(name)) return null;
+        const value = part.slice(eq + 1);
+        out.push(JSON.stringify(name) + ": " + pyConvertClassConstructors(value));
+    }
+    return out.join(", ");
+}
+
+function pyFindMatchingCloseParen(s: string, openIdx: number): number {
+    for (const { ch, i, depth } of pyWalkTopLevel(s.slice(openIdx))) {
+        if (ch === ")" && depth === 0) return openIdx + i;
+    }
+    return -1;
 }
 
 // Removes any `,` that precedes `]` or `}` (with optional whitespace between).
