@@ -586,6 +586,51 @@ describe("pyParseKwargs", () => {
             { name: "id", value: "<expr:SomeEnum.A>" },
         ]);
     });
+    test("rewrites Pydantic-model constructor calls as dict values", () => {
+        // Fern's Python wire tests pass model instances by constructor.
+        // Without unwrapping, the body falls through to `<expr:...>` and
+        // the manifest reports an opaque sentinel instead of the wire shape.
+        const src =
+            'client.agent.update(id="a", request=[JsonPatchOperation(op="replace", path="/name", value="new")])';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "id", value: "a" },
+            {
+                name: "request",
+                value: [{ op: "replace", path: "/name", value: "new" }],
+            },
+        ]);
+    });
+    test("recurses into nested constructors", () => {
+        const src = 'client.foo.bar(req=Outer(field=Inner(x=1, y="z")))';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "req", value: { field: { x: 1, y: "z" } } },
+        ]);
+    });
+    test("rewrites discriminated-union variants (kwargs only, no discriminator field)", () => {
+        // The discriminator property name lives in the OpenAPI/Fern schema,
+        // not the Python source. Best we can do without schema info is emit
+        // the kwargs — incomplete but more useful than `<expr:...>`.
+        const src =
+            'client.fhir_provider.create(auth=FhirProviderCreateRequestAuth_ClientSecret(client_id="cid", client_secret="cs"))';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "auth", value: { client_id: "cid", client_secret: "cs" } },
+        ]);
+    });
+    test("keeps <expr:...> when a constructor uses positional args", () => {
+        // Positional args can't be represented as dict entries. Bail at the
+        // conversion step so the value falls through to the sentinel rather
+        // than producing a misleading partial dict.
+        const src = 'client.foo.bar(req=Foo("positional"))';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "req", value: '<expr:Foo("positional")>' },
+        ]);
+    });
+    test("converts constructor literals (True/False/None) inside args", () => {
+        const src = 'client.foo.bar(req=Foo(active=True, deleted=False, ts=None, n=2))';
+        expect(pyParseKwargs(src)).toEqual([
+            { name: "req", value: { active: true, deleted: false, ts: null, n: 2 } },
+        ]);
+    });
     test("returns empty list for a call with no args", () => {
         expect(pyParseKwargs("client.foo.bar()")).toEqual([]);
     });
