@@ -1052,6 +1052,22 @@ describe("Java parser (streaming-endpoint fixture)", () => {
     });
 });
 
+describe("Java parser (deeply-nested builder fixture)", () => {
+    const root = path.join(FIXTURES, "java-deep-builder");
+    const examples = createJavaParser().parseTestExamples(root);
+
+    test("captures the entire SDK call expression even when it spans 40+ lines", () => {
+        // `.phenomlOnBehalfOf(` sits ~43 lines into the call, past the old cap.
+        expect(examples).toHaveLength(1);
+        const ex = examples[0];
+        expect(ex.sdkCallSource).toContain("client.fhir()");
+        expect(ex.sdkCallSource).toContain(".executeBundle(");
+        expect(ex.sdkCallSource).toContain(".phenomlOnBehalfOf(");
+        expect(isBalancedParens(ex.sdkCallSource)).toBe(true);
+        expect(ex.sdkCallSource.trimEnd().endsWith(")")).toBe(true);
+    });
+});
+
 describe("Java parser (multi-line signature fixture)", () => {
     const root = path.join(FIXTURES, "java-multiline");
     const endpoints = createJavaParser().parseEndpoints(root);
