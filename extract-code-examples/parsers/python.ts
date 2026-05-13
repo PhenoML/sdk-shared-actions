@@ -387,11 +387,22 @@ export function pyExtractTestExamples(
             // (raw line) so indented nested `def test_*` helpers don't terminate.
             if (/^def\s+test_/.test(rawLine)) break;
 
-            // verify_request_count(test_id, "METHOD", "/path", ...)
-            const verifyMatch = line.match(/verify_request_count\s*\([^,]+,\s*"(\w+)"\s*,\s*"([^"]+)"/);
-            if (verifyMatch) {
-                httpMethod = verifyMatch[1];
-                httpPath = verifyMatch[2];
+            // verify_request_count(test_id, "METHOD", "/path", ...). Black
+            // wraps long calls across multiple lines (open paren alone, args
+            // and close paren on subsequent lines), so when we spot the call
+            // collect text forward until parens balance before matching.
+            if (rawLine.includes("verify_request_count")) {
+                let block = rawLine;
+                for (let k = j + 1; !isBalancedParens(block) && k < lines.length; k++) {
+                    block += "\n" + lines[k];
+                }
+                const verifyMatch = block.match(
+                    /verify_request_count\s*\([^,]+,\s*"(\w+)"\s*,\s*"([^"]+)"/,
+                );
+                if (verifyMatch) {
+                    httpMethod = verifyMatch[1];
+                    httpPath = verifyMatch[2];
+                }
             }
 
             // SDK call: client.resource.method(...)
