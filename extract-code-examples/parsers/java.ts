@@ -183,6 +183,7 @@ export function javaExtractEndpoints(
     let collectingPath = false;
     let braceDepth = 0;
     let methodBraceDepth = 0;
+    let methodBodyEntered = false;
     const seen = new Set<string>();
     const lexState = { inBlockComment: false, inTextBlock: false };
 
@@ -230,22 +231,20 @@ export function javaExtractEndpoints(
             pathSegments = [];
             httpMethod = null;
             collectingPath = false;
-            // methodBraceDepth is the brace depth INSIDE the method body. When
-            // the signature ends on this line (`{` is here, delta > 0),
-            // braceDepth already reflects that. When the signature spans
-            // multiple lines and `{` comes later, anticipate the body open
-            // with +1 so the closing `}` reliably triggers `braceDepth <
-            // methodBraceDepth` instead of returning to exactly methodBraceDepth.
-            methodBraceDepth = delta > 0 ? braceDepth : braceDepth + 1;
+            // Enclosing-scope depth (class body). `delta > 0` only when the
+            // body's `{` is on the signature line; otherwise we have to wait
+            // for it on a later line — parameter-only lines of a multi-line
+            // signature sit at this depth and must not be mistaken for an exit.
+            methodBraceDepth = braceDepth - delta;
+            methodBodyEntered = delta > 0;
         }
 
-        // Reset on method exit (brace depth returns to pre-method level).
-        // `else if` rather than `if` so we don't fire the exit on the very
-        // same line where methodMatch just (re)set methodBraceDepth — with
-        // the multi-line-signature anticipation (+1), braceDepth would
-        // immediately satisfy `< methodBraceDepth` and short-circuit the
-        // newly-started method.
-        else if (currentMethod && braceDepth < methodBraceDepth) {
+        // Arm on the line where `{` lifts braceDepth above the enclosing scope.
+        else if (currentMethod && !methodBodyEntered && braceDepth > methodBraceDepth) {
+            methodBodyEntered = true;
+        }
+        // Exit once the body's `}` returns braceDepth to the enclosing scope.
+        else if (currentMethod && methodBodyEntered && braceDepth <= methodBraceDepth) {
             pushEndpoint();
             currentMethod = null;
         }

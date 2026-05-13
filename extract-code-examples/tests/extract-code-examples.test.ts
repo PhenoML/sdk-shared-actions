@@ -1130,6 +1130,17 @@ describe("Java parser (multi-line signature fixture)", () => {
         expect(endpoints.some((e) => e.httpPath === "/wrong/path")).toBe(false);
         expect(endpoints.some((e) => e.httpMethod === "PUT")).toBe(false);
     });
+
+    test("extracts methods whose signature spans 3+ lines (one param per line)", () => {
+        // Parameter-only lines sit at the class-body brace depth — a naive
+        // exit check that fires whenever braceDepth dips to/below the
+        // method's level would drop the endpoint before its body is scanned.
+        const getThingById = endpoints.find((e) => e.methodName === "getThingById");
+        expect(getThingById).toMatchObject({
+            httpMethod: "GET",
+            httpPath: "/things/{codesystem}/{code_id}",
+        });
+    });
 });
 
 // ============================================================
