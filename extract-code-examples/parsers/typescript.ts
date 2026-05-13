@@ -55,15 +55,20 @@ export function tsExtractEndpoints(filePath: string): EndpointMapping[] {
                 const httpMethodArg = args[2];
                 const httpPathArg = args[3];
                 if (ts.isStringLiteral(httpMethodArg) && ts.isStringLiteral(httpPathArg)) {
-                    const methodName = tsFindEnclosingMethodName(node);
-                    if (methodName) {
-                        const publicName = methodName.replace(/^__/, "");
-                        endpoints.push({
+                    const method = tsFindEnclosingMethod(node);
+                    if (method && method.name && ts.isIdentifier(method.name)) {
+                        const publicName = method.name.text.replace(/^__/, "");
+                        // `core.Stream<...>` in the return type marks an SSE method.
+                        const returnTypeText = method.type ? source.slice(method.type.pos, method.type.end) : "";
+                        const isStreaming = /\bStream\s*</.test(returnTypeText);
+                        const entry: EndpointMapping = {
                             httpMethod: httpMethodArg.text,
                             httpPath: normalizePathParams(httpPathArg.text),
                             methodChain: [...methodChainPrefix, publicName],
                             methodName: publicName,
-                        });
+                        };
+                        if (isStreaming) entry.isStreaming = true;
+                        endpoints.push(entry);
                     }
                 }
             }
@@ -82,12 +87,10 @@ function tsDeriveMethodChain(filePath: string): string[] {
     return match[1].split("/resources/");
 }
 
-function tsFindEnclosingMethodName(node: ts.Node): string | null {
+function tsFindEnclosingMethod(node: ts.Node): ts.MethodDeclaration | null {
     let current: ts.Node | undefined = node.parent;
     while (current) {
-        if (ts.isMethodDeclaration(current) && current.name && ts.isIdentifier(current.name)) {
-            return current.name.text;
-        }
+        if (ts.isMethodDeclaration(current)) return current;
         current = current.parent;
     }
     return null;
