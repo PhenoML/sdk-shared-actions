@@ -3,6 +3,10 @@ import * as path from "path";
 import type { EndpointMapping, LanguageParser, TestExample } from "../types";
 import { camelToSnake, findFiles, isBalancedParens, normalizePath } from "../utils";
 
+// Per-@Test scan ceiling; also bounds nested SDK-call collection so an
+// unterminated expression can't consume the rest of the file.
+const MAX_TEST_BODY_LINES = 200;
+
 export function createJavaParser(): LanguageParser {
     return {
         language: "java",
@@ -318,7 +322,7 @@ export function javaExtractTestExamples(filePath: string, rootDir?: string): Tes
         let responseBody: unknown = null;
         let mockResponseCount = 0;
 
-        for (let j = i + 1; j < Math.min(i + 200, lines.length); j++) {
+        for (let j = i + 1; j < Math.min(i + MAX_TEST_BODY_LINES, lines.length); j++) {
             const line = lines[j].trim();
             if (line === "@Test") break;
 
@@ -351,14 +355,17 @@ export function javaExtractTestExamples(filePath: string, rootDir?: string): Tes
                 }
             }
 
-            // SDK call: ... = client.resource().method(...)
-            // May span multiple lines with chained calls like client.tools()\n.mcpServer()\n.create(...)
+            // SDK call: keep collecting while parens are unbalanced OR the
+            // next line is a `.chained()` continuation. A `;` after balance
+            // is a hard terminator (statement end).
             const sdkMatch = line.match(/(client\.\w[\w.()]*\(.*)/);
             if (sdkMatch && !sdkCallSource) {
                 sdkCallSource = sdkMatch[1];
-                for (let k = j + 1; k < Math.min(j + 30, lines.length); k++) {
+                for (let k = j + 1; k < Math.min(j + MAX_TEST_BODY_LINES, lines.length); k++) {
+                    const balanced = isBalancedParens(sdkCallSource);
+                    if (balanced && sdkCallSource.trimEnd().endsWith(";")) break;
                     const nextTrimmed = lines[k].trim();
-                    if (!isBalancedParens(sdkCallSource) || nextTrimmed.startsWith(".")) {
+                    if (!balanced || nextTrimmed.startsWith(".")) {
                         sdkCallSource += "\n" + lines[k];
                     } else {
                         break;
