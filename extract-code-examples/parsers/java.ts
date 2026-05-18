@@ -1,6 +1,21 @@
 import * as fs from "fs";
 import * as path from "path";
-import type { EndpointMapping, LanguageParser, TestExample } from "../types";
+import type {
+    BodySchema,
+    EndpointMapping,
+    LanguageParser,
+    ParamField,
+    RenderSchema,
+    SchemaFieldKind,
+    TestExample,
+} from "../types";
+import type { JavaClassInfo } from "./java-request-class";
+import {
+    JAVA_PRIMITIVE_KIND,
+    buildJavaBodySchema,
+    findJavaClassFile,
+    parseJavaClass,
+} from "./java-request-class";
 import { camelToSnake, findFiles, isBalancedParens, normalizePath } from "../utils";
 
 // Per-@Test scan ceiling; also bounds nested SDK-call collection so an
@@ -25,9 +40,15 @@ export function createJavaParser(): LanguageParser {
 
             const resourcesDir = javaFindResourcesDir(rawClientFiles);
             const accessorMap = javaBuildAccessorMap(javaDir);
+            // Cache parsed request classes across endpoints — the same class
+            // (e.g. CohortRequest) is often referenced by multiple endpoints.
+            const classCache = new Map<string, JavaClassInfo | null>();
             const endpoints: EndpointMapping[] = [];
             for (const file of rawClientFiles) {
                 const fileEndpoints = javaExtractEndpoints(file, resourcesDir, accessorMap);
+                for (const ep of fileEndpoints) {
+                    ep.renderSchema = buildJavaRenderSchema(ep, file, classCache);
+                }
                 endpoints.push(...fileEndpoints);
                 console.error(`  ${path.relative(rootDir, file)}: ${fileEndpoints.length} endpoints`);
             }
@@ -184,6 +205,17 @@ export function javaExtractEndpoints(
     let braceDepth = 0;
     let methodBraceDepth = 0;
     let methodBodyEntered = false;
+    let bodyParamName: string | null = null;
+    let requestClassName: string | null = null;
+    let positionalParams: { name: string; type: string }[] = [];
+    let bodyJsonKeys: string[] | null = null;
+    let headerJsonKeys: string[] = [];
+    // Accumulates the current Java statement across line breaks so calls
+    // like `_requestBuilder.addHeader(\n  "X-...", request.getX());` are
+    // matchable as a single string. Reset on `;`. Lightweight — we don't
+    // track string/comment lexing here because the patterns we match
+    // against (header names, getter calls) only appear in code.
+    let stmtBuf = "";
     const seen = new Set<string>();
     const lexState = { inBlockComment: false, inTextBlock: false };
 
@@ -202,6 +234,10 @@ export function javaExtractEndpoints(
             methodName: currentMethod,
         };
         if (isStreaming) entry.isStreaming = true;
+        if (requestClassName) entry.javaRequestClass = requestClassName;
+        if (positionalParams.length > 0) entry.javaPositionalParams = positionalParams;
+        if (bodyJsonKeys !== null) entry.javaBodyJsonKeys = bodyJsonKeys;
+        if (headerJsonKeys.length > 0) entry.javaHeaderJsonKeys = headerJsonKeys;
         endpoints.push(entry);
     };
 
@@ -237,6 +273,13 @@ export function javaExtractEndpoints(
             // signature sit at this depth and must not be mistaken for an exit.
             methodBraceDepth = braceDepth - delta;
             methodBodyEntered = delta > 0;
+            const classified = javaClassifySignatureParams(javaParseSignatureParams(lines, i));
+            requestClassName = classified.requestClass;
+            bodyParamName = classified.bodyParamName;
+            positionalParams = classified.positional;
+            bodyJsonKeys = null;
+            headerJsonKeys = [];
+            stmtBuf = "";
         }
 
         // Arm on the line where `{` lifts braceDepth above the enclosing scope.
@@ -247,6 +290,12 @@ export function javaExtractEndpoints(
         else if (currentMethod && methodBodyEntered && braceDepth <= methodBraceDepth) {
             pushEndpoint();
             currentMethod = null;
+            requestClassName = null;
+            bodyParamName = null;
+            positionalParams = [];
+            bodyJsonKeys = null;
+            headerJsonKeys = [];
+            stmtBuf = "";
         }
 
         if (!currentMethod) continue;
@@ -270,10 +319,224 @@ export function javaExtractEndpoints(
 
         const httpMethodMatch = line.match(/\.method\s*\(\s*"(\w+)"\s*,/);
         if (httpMethodMatch) httpMethod = httpMethodMatch[1];
+
+        // Header/body-field signals can span multiple lines in Fern's
+        // output (`.addHeader(\n  "X-...", request.getX());`), so accumulate
+        // per-statement (terminated by `;`) before pattern-matching.
+        if (bodyParamName !== null) {
+            stmtBuf += " " + line;
+            if (line.endsWith(";") || line.endsWith("};")) {
+                javaScanBodyStatement(stmtBuf, bodyParamName, (key) => {
+                    if (bodyJsonKeys === null) bodyJsonKeys = [];
+                    bodyJsonKeys.push(key);
+                }, (headerKey) => {
+                    headerJsonKeys.push(headerKey);
+                });
+                stmtBuf = "";
+            }
+        }
     }
 
     pushEndpoint();
     return endpoints;
+}
+
+// Type-name + identifier pair captured from a Java method signature.
+interface SignatureParam {
+    type: string;
+    name: string;
+}
+
+// Collect the parameter list starting at the line containing the method's
+// opening `(`. Returns each param as `{ type, name }`. Handles multi-line
+// signatures by gathering text until the matching `)` is found, and ignores
+// `RequestOptions` (always optional, never relevant to call rendering).
+export function javaParseSignatureParams(lines: string[], startLine: number): SignatureParam[] {
+    const openIdx = lines[startLine].indexOf("(");
+    if (openIdx < 0) return [];
+    // We're already past the opening paren, so paren depth starts at 1 and
+    // we look for the line/column where it returns to 0. Generics and
+    // annotations on individual params don't introduce parens, so a pure
+    // paren counter is enough here (string literals don't appear in Fern's
+    // generated signatures).
+    let depth = 1;
+    let paramList = "";
+    for (let i = startLine; i < Math.min(startLine + 30, lines.length); i++) {
+        const startCol = i === startLine ? openIdx + 1 : 0;
+        const text = lines[i].slice(startCol);
+        for (let c = 0; c < text.length; c++) {
+            const ch = text[c];
+            if (ch === "(") depth++;
+            else if (ch === ")") {
+                depth--;
+                if (depth === 0) {
+                    paramList += text.slice(0, c);
+                    return javaParseParamList(paramList);
+                }
+            }
+        }
+        paramList += text + " ";
+    }
+    return [];
+}
+
+function javaParseParamList(paramList: string): SignatureParam[] {
+    const trimmed = paramList.trim();
+    if (!trimmed) return [];
+    const params: SignatureParam[] = [];
+    for (const raw of javaSplitTopLevelCommas(trimmed)) {
+        const part = raw.trim();
+        if (!part) continue;
+        // Split on the LAST whitespace so multi-token types like
+        // `Optional<String>` or `final @Nullable String` keep their type
+        // text intact; the trailing token is the parameter identifier.
+        const lastSpace = part.search(/\s\S+$/);
+        if (lastSpace < 0) continue;
+        const type = part.slice(0, lastSpace).trim();
+        const name = part.slice(lastSpace + 1).trim();
+        if (!type || !name) continue;
+        params.push({ type, name });
+    }
+    return params;
+}
+
+// Split a Java parameter list on top-level commas, ignoring commas that
+// appear inside generic angles, parens, or annotations.
+function javaSplitTopLevelCommas(s: string): string[] {
+    const out: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (c === "(" || c === "<" || c === "[") depth++;
+        else if (c === ")" || c === ">" || c === "]") depth--;
+        else if (c === "," && depth === 0) {
+            out.push(s.slice(start, i));
+            start = i + 1;
+        }
+    }
+    out.push(s.slice(start));
+    return out;
+}
+
+// Body resolution is best-effort: if the request class file can't be found
+// or parsed, we still emit the call template + params (just without a body
+// schema) so consumers can render the call shell.
+export function buildJavaRenderSchema(
+    endpoint: EndpointMapping,
+    rawClientFile: string,
+    classCache?: Map<string, JavaClassInfo | null>,
+): RenderSchema {
+    // Path-param placeholders use snake_case (matching URL templates) so a
+    // consumer can key path params and body fields off the same wire names.
+    const params: ParamField[] = (endpoint.javaPositionalParams ?? []).map((p) => ({
+        name: camelToSnake(p.name),
+        kind: javaInferParamKind(p.type),
+    }));
+
+    const accessors = endpoint.methodChain.slice(0, -1);
+    const chainStr = ["client", ...accessors.map((a) => `${a}()`)].join(".")
+        + "." + endpoint.methodName;
+    const positionalStr = params.map((p) => `{{${p.name}}}`).join(", ");
+
+    let callTemplate: string;
+    let body: BodySchema | undefined;
+
+    if (endpoint.javaRequestClass) {
+        const bodyExpr = `${endpoint.javaRequestClass}.builder(){{__body__}}.build()`;
+        callTemplate = `${chainStr}(${positionalStr ? `${positionalStr}, ${bodyExpr}` : bodyExpr})`;
+
+        const classFile = findJavaClassFile(rawClientFile, endpoint.javaRequestClass);
+        if (classFile) {
+            const classInfo = parseJavaClassCached(classFile, classCache);
+            if (classInfo) {
+                body = buildJavaBodySchema(classInfo, {
+                    headerJsonKeys: new Set(endpoint.javaHeaderJsonKeys ?? []),
+                    bodyJsonKeys: endpoint.javaBodyJsonKeys,
+                });
+            }
+        }
+    } else {
+        callTemplate = `${chainStr}(${positionalStr})`;
+    }
+
+    const schema: RenderSchema = { callTemplate, params };
+    if (body) schema.body = body;
+    return schema;
+}
+
+function parseJavaClassCached(
+    filePath: string,
+    cache?: Map<string, JavaClassInfo | null>,
+): JavaClassInfo | null {
+    if (!cache) return parseJavaClass(filePath);
+    const cached = cache.get(filePath);
+    if (cached !== undefined) return cached;
+    const info = parseJavaClass(filePath);
+    cache.set(filePath, info);
+    return info;
+}
+
+// Path/query params come through the JAVA_PRIMITIVE_KIND table; unknown
+// types fall back to "string" since Fern only ever emits scalar path args.
+function javaInferParamKind(type: string): SchemaFieldKind {
+    return JAVA_PRIMITIVE_KIND[type.trim()] ?? "string";
+}
+
+// Inspect a single (line-joined) Java statement for body-field and
+// header-field signals. We look for two patterns Fern uses inside raw
+// client methods:
+//   `properties.put("jsonKey", request.getFoo())` — explicit body field
+//   `.addHeader("X-...", request.getFoo()...)`    — body-class header
+// The body-param identifier (`request` in Fern's output) is supplied by
+// the caller so we only count calls that pull from THAT param, not e.g.
+// `clientOptions.headers(...)`.
+function javaScanBodyStatement(
+    stmt: string,
+    bodyParamName: string,
+    onBodyKey: (key: string) => void,
+    onHeaderKey: (key: string) => void,
+): void {
+    for (const m of stmt.matchAll(/\bproperties\.put\s*\(\s*"([^"]+)"\s*,/g)) {
+        onBodyKey(m[1]);
+    }
+    for (const m of stmt.matchAll(/\.addHeader\s*\(\s*"([^"]+)"\s*,\s*([^)]*)/g)) {
+        if (m[2].includes(`${bodyParamName}.`)) onHeaderKey(m[1]);
+    }
+}
+
+// Classify Fern-generated signature params. The Fern Java codegen places
+// path/query params first, the request body last (immediately before any
+// trailing RequestOptions), and uses the type's "Request" suffix to mark
+// body params unambiguously.
+export function javaClassifySignatureParams(params: SignatureParam[]): {
+    requestClass: string | null;
+    bodyParamName: string | null;
+    positional: { name: string; type: string }[];
+} {
+    // Drop trailing RequestOptions — never relevant to call rendering.
+    const filtered = params.filter((p) => !/^RequestOptions\b/.test(p.type));
+    if (filtered.length === 0) {
+        return { requestClass: null, bodyParamName: null, positional: [] };
+    }
+    // The Fern convention names the body type with a "Request" suffix
+    // (e.g. CohortRequest, AgentChatRequest). When the last param ends in
+    // "Request", treat it as the body; otherwise this endpoint has no body
+    // (e.g. GETs with only path params).
+    const last = filtered[filtered.length - 1];
+    const isBody = /Request$/.test(last.type) || last.type.includes(".Request");
+    if (!isBody) {
+        return {
+            requestClass: null,
+            bodyParamName: null,
+            positional: filtered.map(({ name, type }) => ({ name, type })),
+        };
+    }
+    return {
+        requestClass: last.type,
+        bodyParamName: last.name,
+        positional: filtered.slice(0, -1).map(({ name, type }) => ({ name, type })),
+    };
 }
 
 export function javaDeriveMethodChain(

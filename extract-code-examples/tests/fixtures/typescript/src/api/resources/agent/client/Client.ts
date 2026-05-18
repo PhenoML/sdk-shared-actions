@@ -76,4 +76,25 @@ export class AgentClient {
 
         return handleNonStatusCodeError(_response.error, _response.rawResponse, "POST", "/agent/stream-chat");
     }
+
+    public chat(
+        request: phenoml.agent.AgentChatRequest,
+        requestOptions?: AgentClient.RequestOptions,
+    ): core.HttpResponsePromise<unknown> {
+        return core.HttpResponsePromise.fromPromise(this.__chat(request, requestOptions));
+    }
+
+    private async __chat(
+        request: phenoml.agent.AgentChatRequest,
+        requestOptions?: AgentClient.RequestOptions,
+    ): Promise<core.WithRawResponse<unknown>> {
+        const { "X-Phenoml-On-Behalf-Of": phenomlOnBehalfOf, ..._body } = request;
+        const _response = await (this._options.fetcher ?? core.fetcher)({
+            url: "https://example/agent/chat",
+            method: "POST",
+            body: _body,
+        });
+        if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
+        return handleNonStatusCodeError(_response.error, _response.rawResponse, "POST", "/agent/chat");
+    }
 }

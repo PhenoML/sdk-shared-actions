@@ -29,6 +29,31 @@ export interface EndpointMapping {
     // placeholder body (e.g. `{}`) that the SDK never parses as JSON, so
     // the manifest must not surface that placeholder as a real response.
     isStreaming?: boolean;
+    // Java-only: Fern request class name from the RawClient method signature
+    // (e.g. "CohortRequest"). Drives request-class file discovery in phase
+    // 2b. Undefined for endpoints with no body parameter.
+    javaRequestClass?: string;
+    // Java-only: when the raw client builds the body with explicit
+    // `properties.put("jsonKey", request.getX())` calls instead of
+    // whole-object `writeValueAsBytes(request)`, this lists those JSON
+    // keys in insertion order. When undefined, the body is the whole
+    // request object (filter the request class's fields by
+    // `javaHeaderJsonKeys` to recover what actually ships).
+    javaBodyJsonKeys?: string[];
+    // Java-only: JSON keys (from `@JsonProperty`) that the raw client
+    // forwards as headers via `.addHeader(...)` rather than including in
+    // the body. Used to subtract header fields from the request class
+    // catalog when composing the body schema.
+    javaHeaderJsonKeys?: string[];
+    // Java-only: parameter names (in declaration order) preceding the
+    // request body param on the SDK method. These are the positional
+    // path/query args the consumer must supply alongside the body.
+    javaPositionalParams?: { name: string; type: string }[];
+    // Built during a second pass after the file walk; carries the per-
+    // endpoint information consumers need to render the SDK call from a
+    // user-supplied body. Optional during incremental rollout; when set,
+    // copied verbatim onto the corresponding CodeExample.
+    renderSchema?: RenderSchema;
 }
 
 export interface TestExample {
@@ -58,6 +83,98 @@ export interface CodeExample {
         streaming?: boolean;
     };
     sdkCallSource: string;
+    // Dynamic-render schema. Lets a consumer (e.g. docs playground) regenerate
+    // the SDK call for any user-provided body without re-encoding language
+    // semantics — see RenderSchema. Optional during phased per-language
+    // rollout; populated unconditionally once a language's parser supports it.
+    render?: RenderSchema;
+}
+
+// Per-example structure that lets a single consumer-side algorithm render
+// the SDK call for arbitrary user input. Combined with the manifest-level
+// renderRules, it replaces ad-hoc string templating with a uniform
+// "schema + value substitution" model.
+export interface RenderSchema {
+    // Call wrapper string. Contains:
+    //   {{paramName}}   placeholder for each entry in `params`
+    //   {{__body__}}    placeholder for the joined body field renderings
+    //                   (omitted when `body` is undefined)
+    // Examples (illustrative, see README):
+    //   Java:   "client.tools().analyzeCohort(CohortRequest.builder(){{__body__}}.build())"
+    //   Python: "client.tools.analyze_cohort({{__body__}})"
+    //   TS:     "client.tools.analyzeCohort({ {{__body__}} })"
+    callTemplate: string;
+    // Path and query params, ordered to match `callTemplate` placeholders.
+    params: ParamField[];
+    // Absent for endpoints with no request body (e.g. GETs without query input).
+    body?: BodySchema;
+}
+
+export interface ParamField {
+    // Matches a {{name}} placeholder in callTemplate.
+    name: string;
+    // Path and query params are always scalar.
+    kind: "string" | "number" | "boolean";
+}
+
+export interface BodySchema {
+    // Ordered. For Java staged builders this is the required-fields-first
+    // order the builder enforces; for TS/Python it's the declaration order
+    // from the request type / raw client signature.
+    fields: SchemaField[];
+    // Joiner inserted between rendered fields when assembling the body.
+    // "" for Java (each field starts with "."), ", " for TS/Python.
+    fieldSeparator: string;
+}
+
+export interface SchemaField {
+    // Wire (JSON) key.
+    jsonKey: string;
+    // Per-field render template containing a `{{value}}` placeholder that
+    // the consumer replaces with a language-native literal rendered via
+    // renderRules. Examples: `.text({{value}})` (Java), `text={{value}}`
+    // (Python), `text: {{value}}` (TS).
+    fieldTemplate: string;
+    kind: SchemaFieldKind;
+    // True when the field has no default and must be present in any
+    // generated call (Java staged builders enforce this; TS/Python report
+    // it for fidelity).
+    required: boolean;
+    // Set when `kind === "object"`. Lets the consumer recurse into the
+    // nested type without needing language-specific object-rendering
+    // logic (each nested level brings its own wrap/separator).
+    nested?: BodySchema;
+    // Set when `kind === "list"`. Describes a single list item; the
+    // consumer applies it once per element.
+    items?: SchemaField;
+    // Set when `kind === "enum"`. Lists allowed values for UI dropdowns.
+    enumValues?: string[];
+}
+
+export type SchemaFieldKind =
+    | "string"
+    | "number"
+    | "boolean"
+    | "list"
+    | "object"
+    | "enum";
+
+// Language-wide rendering constants. The consumer uses these to format any
+// JSON value into a language-native literal. One algorithm works across all
+// SDK languages because every language-specific quirk lives here.
+export interface RenderRules {
+    // Each *Literal field contains the literal text for that value kind.
+    // String/number/boolean templates contain a `{{value}}` placeholder.
+    // For strings, `{{value}}` is replaced with JSON-escaped content
+    // (without surrounding quotes); the template supplies the quoting.
+    stringLiteral: string;     // e.g. `"{{value}}"`
+    numberLiteral: string;     // e.g. `{{value}}`
+    trueLiteral: string;       // "true" | "True"
+    falseLiteral: string;      // "false" | "False"
+    nullLiteral: string;       // "null" | "None"
+    // List rendering: `{{items}}` becomes the joined rendered items.
+    listLiteral: string;       // Java: `Arrays.asList({{items}})`; TS/Python: `[{{items}}]`
+    listSeparator: string;     // typically ", "
 }
 
 export interface Manifest {
@@ -68,6 +185,9 @@ export interface Manifest {
         specCommit: string;
         generatorName: string;
     };
+    // Language-wide constants for the consumer-side renderer. Same algorithm
+    // applies to every SDK language; only these values differ.
+    renderRules: RenderRules;
     examples: Record<string, CodeExample>;
 }
 

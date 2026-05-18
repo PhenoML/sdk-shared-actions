@@ -8,12 +8,34 @@ import {
     createTypeScriptParser,
     deriveBodyFromKwargs,
     isBalancedParens,
+    buildJavaBodySchema,
+    buildPythonRenderSchema,
+    buildTsRenderSchema,
+    findJavaClassFile,
     javaBuildAccessorMap,
+    javaClassifySignatureParams,
     javaCountBraceDelta,
     javaDeriveMethodChain,
     javaExtractConcatenatedString,
     javaExtractSetBody,
+    javaParseSignatureParams,
     javaUnescape,
+    parseJavaClass,
+    parseJavaEnumValues,
+    parseJavaFieldDeclarations,
+    parseJavaJsonIgnoredFields,
+    parseJavaJsonProperties,
+    parseJavaStagedBuilderOrder,
+    pyExtractEnumValues,
+    pyExtractHeaderKwargs,
+    pyExtractMethodKwargs,
+    pyInferKind,
+    pyStripOptional,
+    pyUnwrapList,
+    tsExtractMethodSignatureInfo,
+    tsInferKind,
+    tsParseRequestInterface,
+    tsResolveRequestInterfacePath,
     normalizePath,
     normalizePathParams,
     pyDeriveMethodChain,
@@ -171,6 +193,63 @@ describe("javaCountBraceDelta", () => {
 // ============================================================
 // Java helpers
 // ============================================================
+
+describe("javaParseSignatureParams", () => {
+    test("parses a single-line signature", () => {
+        const lines = ["    public PhenomlClientHttpResponse<Foo> bar(String id, CohortRequest request) {"];
+        expect(javaParseSignatureParams(lines, 0)).toEqual([
+            { type: "String", name: "id" },
+            { type: "CohortRequest", name: "request" },
+        ]);
+    });
+    test("parses a multi-line signature", () => {
+        const lines = [
+            "    public PhenomlClientHttpResponse<Foo> bar(",
+            "            String id,",
+            "            CohortRequest request,",
+            "            RequestOptions requestOptions) {",
+        ];
+        expect(javaParseSignatureParams(lines, 0)).toEqual([
+            { type: "String", name: "id" },
+            { type: "CohortRequest", name: "request" },
+            { type: "RequestOptions", name: "requestOptions" },
+        ]);
+    });
+    test("keeps generic types intact", () => {
+        // The naive split-on-space approach would slice `Optional<List<String>>`
+        // into pieces; the param-list splitter must respect angle nesting.
+        const lines = ["    public PhenomlClientHttpResponse<Foo> bar(Optional<List<String>> tags) {"];
+        expect(javaParseSignatureParams(lines, 0)).toEqual([
+            { type: "Optional<List<String>>", name: "tags" },
+        ]);
+    });
+});
+
+describe("javaClassifySignatureParams", () => {
+    test("treats the trailing *Request param as the body", () => {
+        const result = javaClassifySignatureParams([
+            { type: "String", name: "id" },
+            { type: "CohortRequest", name: "request" },
+            { type: "RequestOptions", name: "requestOptions" },
+        ]);
+        expect(result).toEqual({
+            requestClass: "CohortRequest",
+            bodyParamName: "request",
+            positional: [{ name: "id", type: "String" }],
+        });
+    });
+    test("returns no requestClass when no param ends in 'Request'", () => {
+        // GET endpoints with only path params look like this — there's nothing
+        // to wire into a body schema, just positional path args.
+        const result = javaClassifySignatureParams([
+            { type: "String", name: "id" },
+            { type: "RequestOptions", name: "requestOptions" },
+        ]);
+        expect(result.requestClass).toBeNull();
+        expect(result.bodyParamName).toBeNull();
+        expect(result.positional).toEqual([{ name: "id", type: "String" }]);
+    });
+});
 
 describe("javaUnescape", () => {
     test("handles common escapes", () => {
@@ -866,12 +945,13 @@ describe("TypeScript parser (Summary client fixture)", () => {
     const endpoints = parser.parseEndpoints(root);
     const examples = parser.parseTestExamples(root);
 
-    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming endpoint", () => {
+    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming + chat endpoints", () => {
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /fhir2summary/template/{id}",
             "GET /fhir2summary/template/{id}",
             "GET /fhir2summary/templates",
+            "POST /agent/chat",
             "POST /agent/stream-chat",
             "POST /fhir2summary/create",
             "POST /fhir2summary/template",
@@ -932,6 +1012,87 @@ describe("TypeScript parser (Summary client fixture)", () => {
             body: null,
             streaming: true,
         });
+    });
+
+    test("renderSchema reads the request interface and filters destructured header keys", () => {
+        // `chat` has `const { "X-Phenoml-On-Behalf-Of": ..., ..._body } = request`
+        // so the header key must be absent from body.fields, leaving just
+        // the wire body properties.
+        const chat = endpoints.find((e) => e.methodName === "chat")!;
+        expect(chat.renderSchema?.callTemplate).toBe("client.agent.chat({ {{__body__}} })");
+        const fields = chat.renderSchema?.body?.fields ?? [];
+        expect(fields.map((f) => f.jsonKey)).toEqual(["message", "role", "tools"]);
+        expect(fields.find((f) => f.jsonKey === "X-Phenoml-On-Behalf-Of")).toBeUndefined();
+    });
+
+    test("renderSchema exposes namespace-const enums via enumValues", () => {
+        // `role?: AgentChatRequest.Role` resolves to the sibling namespace's
+        // `const Role = { Assistant: "assistant", ... } as const`.
+        const chat = endpoints.find((e) => e.methodName === "chat")!;
+        const role = chat.renderSchema?.body?.fields.find((f) => f.jsonKey === "role");
+        expect(role?.kind).toBe("enum");
+        expect(role?.enumValues).toEqual(["assistant", "reviewer"]);
+    });
+
+    test("renderSchema recognizes list types and recurses into items", () => {
+        const chat = endpoints.find((e) => e.methodName === "chat")!;
+        const tools = chat.renderSchema?.body?.fields.find((f) => f.jsonKey === "tools");
+        expect(tools?.kind).toBe("list");
+        expect(tools?.items?.kind).toBe("string");
+    });
+
+    test("renderSchema keeps body-shaped header keys when the method skips destructuring", () => {
+        // `streamChat` ships `body: request` whole, so even the X-header
+        // field stays in body.fields. (The wire payload still has it; the
+        // SDK just leaves header forwarding to the test harness.)
+        const stream = endpoints.find((e) => e.methodName === "streamChat")!;
+        const keys = stream.renderSchema?.body?.fields.map((f) => f.jsonKey) ?? [];
+        expect(keys).toContain("X-Phenoml-On-Behalf-Of");
+        expect(keys).toContain("message");
+    });
+});
+
+describe("typescript-schema helpers", () => {
+    const enums = new Map<string, string[]>([["Role", ["assistant", "reviewer"]]]);
+
+    test("tsInferKind classifies the shapes Fern emits", () => {
+        expect(tsInferKind("string", enums)).toBe("string");
+        expect(tsInferKind("number", enums)).toBe("number");
+        expect(tsInferKind("boolean", enums)).toBe("boolean");
+        expect(tsInferKind("string[]", enums)).toBe("list");
+        expect(tsInferKind("ReadonlyArray<number>", enums)).toBe("list");
+        expect(tsInferKind("Foo.Role", enums)).toBe("enum");
+        expect(tsInferKind("SomeOtherType", enums)).toBe("object");
+    });
+
+    test("tsExtractMethodSignatureInfo returns the request type name + destructured header keys", () => {
+        const clientFile = path.join(FIXTURES, "typescript", "src", "api", "resources", "agent", "client", "Client.ts");
+        const info = tsExtractMethodSignatureInfo(clientFile, "chat");
+        expect(info?.requestTypeName).toBe("AgentChatRequest");
+        expect(info?.headerKeys.has("X-Phenoml-On-Behalf-Of")).toBe(true);
+    });
+
+    test("tsResolveRequestInterfacePath looks under the client's sibling requests/ dir", () => {
+        const clientFile = path.join(FIXTURES, "typescript", "src", "api", "resources", "agent", "client", "Client.ts");
+        const interfaceFile = tsResolveRequestInterfacePath(clientFile, "AgentChatRequest");
+        expect(interfaceFile).toBeTruthy();
+        expect(interfaceFile!.endsWith("AgentChatRequest.ts")).toBe(true);
+    });
+
+    test("tsParseRequestInterface extracts fields + namespace-const enums", () => {
+        const clientFile = path.join(FIXTURES, "typescript", "src", "api", "resources", "agent", "client", "Client.ts");
+        const interfaceFile = tsResolveRequestInterfacePath(clientFile, "AgentChatRequest")!;
+        const info = tsParseRequestInterface(interfaceFile);
+        expect(info?.interfaceName).toBe("AgentChatRequest");
+        expect(info?.fields.map((f) => f.jsonKey)).toEqual([
+            "X-Phenoml-On-Behalf-Of",
+            "message",
+            "role",
+            "tools",
+        ]);
+        expect(info?.fields.find((f) => f.jsonKey === "message")?.isOptional).toBe(false);
+        expect(info?.fields.find((f) => f.jsonKey === "role")?.isOptional).toBe(true);
+        expect(info?.enums.get("Role")).toEqual(["assistant", "reviewer"]);
     });
 });
 
@@ -1042,6 +1203,87 @@ describe("Python parser (Authtoken auth fixture)", () => {
             client_secret: "my-secret",
         });
     });
+
+    test("renderSchema emits an all-kwarg call template plus a typed BodySchema", () => {
+        // Python Fern signatures are all-kwarg; the consumer renders every
+        // input (including path params) as a kwarg, so callTemplate has no
+        // {{name}} placeholders and `params` is always empty.
+        const getToken = endpoints.find((e) => e.methodName === "get_token")!;
+        expect(getToken.renderSchema?.callTemplate).toBe("client.authtoken.auth.get_token({{__body__}})");
+        expect(getToken.renderSchema?.params).toEqual([]);
+        const fields = getToken.renderSchema?.body?.fields ?? [];
+        expect(fields.map((f) => f.jsonKey)).toEqual(["grant_type", "client_id", "client_secret"]);
+        for (const f of fields) {
+            expect(f.fieldTemplate).toBe(`${f.jsonKey}={{value}}`);
+            expect(f.required).toBe(false);
+        }
+    });
+
+    test("renderSchema treats path-param kwargs like body fields", () => {
+        // users.get_user takes `user_id` as a positional-or-kwarg arg with
+        // no default. The wire body is empty but the consumer still needs
+        // to render `user_id="..."` — putting it in body.fields matches
+        // Python's call shape.
+        const getUser = endpoints.find((e) => e.methodName === "get_user")!;
+        const fields = getUser.renderSchema?.body?.fields ?? [];
+        expect(fields.length).toBe(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "user_id",
+            fieldTemplate: "user_id={{value}}",
+            kind: "string",
+            required: true,
+        });
+    });
+});
+
+describe("python-schema helpers", () => {
+    test("pyInferKind recognizes the type shapes Fern emits", () => {
+        expect(pyInferKind("str")).toBe("string");
+        expect(pyInferKind("typing.Optional[str]")).toBe("string");
+        expect(pyInferKind("int")).toBe("number");
+        expect(pyInferKind("bool")).toBe("boolean");
+        expect(pyInferKind("typing.Sequence[str]")).toBe("list");
+        expect(pyInferKind("typing.Optional[typing.Sequence[str]]")).toBe("list");
+        // Fern enum shape: Union[Literal["a","b"], Any]
+        expect(pyInferKind('typing.Union[typing.Literal["a", "b"], typing.Any]')).toBe("enum");
+    });
+
+    test("pyStripOptional unwraps a single Optional layer", () => {
+        expect(pyStripOptional("typing.Optional[str]")).toBe("str");
+        expect(pyStripOptional("Optional[List[int]]")).toBe("List[int]");
+        expect(pyStripOptional("str")).toBe("str");
+    });
+
+    test("pyUnwrapList returns the inner type or 'object' as a fallback", () => {
+        expect(pyUnwrapList("typing.Sequence[str]")).toBe("str");
+        expect(pyUnwrapList("typing.Optional[typing.List[int]]")).toBe("int");
+        expect(pyUnwrapList("str")).toBe("object");
+    });
+
+    test("pyExtractEnumValues pulls out Literal values", () => {
+        const t = 'typing.Union[typing.Literal["x", "y", "z"], typing.Any]';
+        expect(pyExtractEnumValues(t)).toEqual(["x", "y", "z"]);
+    });
+
+    test("pyExtractMethodKwargs reads kwargs with their type annotations", () => {
+        const filePath = path.join(FIXTURES, "python", "src", "phenoml", "authtoken", "auth", "raw_client.py");
+        const kwargs = pyExtractMethodKwargs(filePath, "get_token");
+        expect(kwargs.map((k) => k.name)).toEqual(["grant_type", "client_id", "client_secret"]);
+        for (const kw of kwargs) {
+            expect(kw.typeAnnotation).toBe("typing.Optional[str]");
+            expect(kw.hasDefault).toBe(true);
+        }
+    });
+
+    test("pyExtractHeaderKwargs is empty when the method has no header kwargs", () => {
+        // The fixture's get_token doesn't push any kwargs into headers.
+        const filePath = path.join(FIXTURES, "python", "src", "phenoml", "authtoken", "auth", "raw_client.py");
+        const headers = pyExtractHeaderKwargs(filePath, "get_token");
+        // Don't strictly assert size — just that nothing kwarg-shaped leaked.
+        expect(headers.has("grant_type")).toBe(false);
+        expect(headers.has("client_id")).toBe(false);
+        expect(headers.has("client_secret")).toBe(false);
+    });
 });
 
 describe("Java parser (AuthtokenAuth fixture)", () => {
@@ -1072,6 +1314,19 @@ describe("Java parser (AuthtokenAuth fixture)", () => {
         // SDK call source is preserved with chained calls
         expect(ex.sdkCallSource).toContain("client.authtoken()");
         expect(ex.sdkCallSource).toContain(".generateToken(");
+    });
+
+    test("parseEndpoints captures the request class name from the method signature", () => {
+        // generateToken(AuthGenerateTokenRequest request, RequestOptions requestOptions)
+        // → javaRequestClass="AuthGenerateTokenRequest". Drives phase 2b's
+        //   request-class file discovery.
+        const generateToken = endpoints.find((e) => e.methodName === "generateToken");
+        expect(generateToken?.javaRequestClass).toBe("AuthGenerateTokenRequest");
+        // Whole-object body (writeValueAsBytes), no explicit properties.put.
+        expect(generateToken?.javaBodyJsonKeys).toBeUndefined();
+        // No request-derived headers in the fixture.
+        expect(generateToken?.javaHeaderJsonKeys).toBeUndefined();
+        expect(generateToken?.javaPositionalParams).toBeUndefined();
     });
 });
 
@@ -1171,8 +1426,211 @@ describe("Java parser (multi-line signature fixture)", () => {
 });
 
 // ============================================================
+// Java request-class parser (small helper tests)
+// ============================================================
+
+describe("parseJavaFieldDeclarations", () => {
+    test("extracts only outer-class fields, not nested-class fields", () => {
+        // Fern request classes nest union/builder inner classes that also
+        // declare `private final` fields. A naive scan would mix them into
+        // the outer schema; the scoping fix bounds collection to depth 1.
+        const source = `
+            public final class Outer {
+                private final String text;
+                private final Optional<List<String>> tags;
+                private final Map<String, Object> additionalProperties;
+                public static final class Inner {
+                    private final Object value;
+                    private final int type;
+                }
+            }
+        `;
+        const fields = parseJavaFieldDeclarations(source);
+        expect(fields.map((f) => f.fieldName)).toEqual(["text", "tags"]);
+        expect(fields[1].isOptional).toBe(true);
+        expect(fields[1].innerType).toBe("List<String>");
+    });
+});
+
+describe("parseJavaJsonProperties", () => {
+    test("maps Fern getter names back to wire keys", () => {
+        const source = `
+            @JsonProperty("X-Phenoml-On-Behalf-Of")
+            public Optional<String> getPhenomlOnBehalfOf() { return phenomlOnBehalfOf; }
+            @JsonProperty("provider")
+            public String getProvider() { return provider; }
+        `;
+        const map = parseJavaJsonProperties(source);
+        expect(map.get("phenomlOnBehalfOf")).toBe("X-Phenoml-On-Behalf-Of");
+        expect(map.get("provider")).toBe("provider");
+    });
+});
+
+describe("parseJavaJsonIgnoredFields", () => {
+    test("flags @JsonIgnore'd getters so the schema excludes them", () => {
+        const source = `
+            @JsonIgnore
+            public Optional<String> getPhenomlOnBehalfOf() { return phenomlOnBehalfOf; }
+            @JsonProperty("text")
+            public String getText() { return text; }
+        `;
+        const ignored = parseJavaJsonIgnoredFields(source);
+        expect(ignored.has("phenomlOnBehalfOf")).toBe(true);
+        expect(ignored.has("text")).toBe(false);
+    });
+});
+
+describe("parseJavaStagedBuilderOrder", () => {
+    test("recovers required-field order from staged-builder interfaces", () => {
+        // Each non-_FinalStage interface has exactly one setter whose name is
+        // the field. Order across interfaces is the required-field order.
+        const source = `
+            public interface TextStage { ProviderStage text(@NotNull String text); Builder from(X other); }
+            public interface ProviderStage { _FinalStage provider(@NotNull String provider); }
+            public interface _FinalStage {
+                X build();
+                _FinalStage scope(Optional<String> scope);
+            }
+        `;
+        expect(parseJavaStagedBuilderOrder(source)).toEqual(["text", "provider"]);
+    });
+});
+
+describe("parseJavaEnumValues", () => {
+    test("captures wire values from Fern enum constructors", () => {
+        const source = `
+            public enum AgentRole {
+                ASSISTANT("assistant"),
+                REVIEWER("reviewer");
+                private final String value;
+                AgentRole(String value) { this.value = value; }
+            }
+        `;
+        expect(parseJavaEnumValues(source)).toContain("assistant");
+        expect(parseJavaEnumValues(source)).toContain("reviewer");
+    });
+});
+
+// ============================================================
+// Java parser (rich schema fixture)
+// ============================================================
+
+describe("Java parser (rich schema fixture)", () => {
+    const root = path.join(FIXTURES, "java-schema");
+    const parser = createJavaParser();
+    const endpoints = parser.parseEndpoints(root);
+    const createAgent = endpoints.find((e) => e.methodName === "createAgent")!;
+
+    test("extracts positional params with snake_case names matching URL template", () => {
+        // Java method `createAgent(String orgId, String teamId, ..., request, ...)`
+        // → URL template `{org_id}` / `{team_id}`. Consumer keys path-param
+        // substitutions by the wire (snake_case) names.
+        expect(createAgent.javaPositionalParams).toEqual([
+            { name: "orgId", type: "String" },
+            { name: "teamId", type: "String" },
+        ]);
+        expect(createAgent.renderSchema?.params).toEqual([
+            { name: "org_id", kind: "string" },
+            { name: "team_id", kind: "string" },
+        ]);
+    });
+
+    test("emits a callTemplate that interleaves path params with the body builder", () => {
+        // The body builder always trails the path params and follows the
+        // RequestClass.builder()...build() shape.
+        expect(createAgent.renderSchema?.callTemplate).toBe(
+            "client.agent().createAgent({{org_id}}, {{team_id}}, CreateAgentRequest.builder(){{__body__}}.build())",
+        );
+    });
+
+    test("body schema lists required fields first, then optional, and includes per-kind metadata", () => {
+        const fields = createAgent.renderSchema?.body?.fields ?? [];
+        const keys = fields.map((f) => f.jsonKey);
+        // Required (staged-builder order) before optionals; @JsonIgnore'd
+        // header field (phenomlOnBehalfOf) excluded entirely.
+        expect(keys).toEqual(["name", "role", "tools", "description"]);
+        expect(fields[0]).toMatchObject({ kind: "string", required: true });
+        expect(fields[1]).toMatchObject({ kind: "enum", required: true });
+        expect(fields[1].enumValues).toEqual(["assistant", "reviewer", "custom"]);
+        expect(fields[2]).toMatchObject({ kind: "list", required: false });
+        expect(fields[2].items).toMatchObject({ kind: "string" });
+        expect(fields[3]).toMatchObject({ kind: "string", required: false });
+    });
+
+    test("fieldTemplate uses the camelCase setter name and {{value}} placeholder", () => {
+        const fields = createAgent.renderSchema?.body?.fields ?? [];
+        expect(fields.map((f) => f.fieldTemplate)).toEqual([
+            ".name({{value}})",
+            ".role({{value}})",
+            ".tools({{value}})",
+            ".description({{value}})",
+        ]);
+        expect(createAgent.renderSchema?.body?.fieldSeparator).toBe("");
+    });
+});
+
+describe("Java parser (AuthtokenAuth fixture) — render schema", () => {
+    const root = path.join(FIXTURES, "java");
+    const parser = createJavaParser();
+    const endpoints = parser.parseEndpoints(root);
+    const generateToken = endpoints.find((e) => e.methodName === "generateToken")!;
+
+    test("end-to-end render schema for an endpoint with no path params", () => {
+        // No positional args → `params` is empty and the call template
+        // contains only the body-builder placeholder.
+        expect(generateToken.renderSchema).toMatchObject({
+            callTemplate: "client.authtoken().auth().generateToken(AuthGenerateTokenRequest.builder(){{__body__}}.build())",
+            params: [],
+            body: {
+                fieldSeparator: "",
+                fields: [
+                    { jsonKey: "username", fieldTemplate: ".username({{value}})", kind: "string", required: true },
+                    { jsonKey: "password", fieldTemplate: ".password({{value}})", kind: "string", required: true },
+                    { jsonKey: "scope", fieldTemplate: ".scope({{value}})", kind: "string", required: false },
+                ],
+            },
+        });
+    });
+
+    test("renderRules + render schema land in the assembled manifest", () => {
+        const examples = parser.parseTestExamples(root);
+        const meta = { generatorName: "fernapi/fern-java-sdk", sdkVersion: "0.0.0", originGitCommit: "deadbeef" };
+        const manifest = buildManifest(endpoints, examples, "java", "com.phenoml", meta);
+        expect(manifest.renderRules.listLiteral).toBe("Arrays.asList({{items}})");
+        const example = manifest.examples["POST /auth/token"];
+        expect(example.render?.callTemplate).toContain("AuthGenerateTokenRequest.builder()");
+    });
+});
+
+// ============================================================
 // buildManifest — chain-index collision handling
 // ============================================================
+
+// ============================================================
+// buildManifest — renderRules
+// ============================================================
+
+describe("buildManifest renderRules", () => {
+    const metadata = {
+        generatorName: "fernapi/fern-typescript-sdk",
+        sdkVersion: "0.0.0",
+        originGitCommit: "deadbeef",
+    };
+
+    test("emits language-appropriate render constants", () => {
+        // Single source of truth for downstream renderers — Python's boolean
+        // capitalization and Java's Arrays.asList wrapper are the things
+        // that distinguish languages most visibly.
+        const ts = buildManifest([], [], "typescript", "pkg", metadata);
+        expect(ts.renderRules.trueLiteral).toBe("true");
+        expect(ts.renderRules.listLiteral).toBe("[{{items}}]");
+        const py = buildManifest([], [], "python", "pkg", metadata);
+        expect(py.renderRules.trueLiteral).toBe("True");
+        expect(py.renderRules.nullLiteral).toBe("None");
+        const java = buildManifest([], [], "java", "pkg", metadata);
+        expect(java.renderRules.listLiteral).toBe("Arrays.asList({{items}})");
+    });
+});
 
 describe("buildManifest chain-index", () => {
     const metadata = {

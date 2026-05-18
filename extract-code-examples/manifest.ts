@@ -4,9 +4,45 @@ import type {
     FernMetadata,
     Language,
     Manifest,
+    RenderRules,
     TestExample,
 } from "./types";
 import { pathMatchesTemplate } from "./utils";
+
+// Per-language constants consumed by the (language-agnostic) renderer that
+// runs in downstream tools. Adding a new SDK language means adding an entry
+// here plus a parser that emits RenderSchema on each example.
+const RENDER_RULES_BY_LANGUAGE: Record<Language, RenderRules> = {
+    typescript: {
+        stringLiteral: `"{{value}}"`,
+        numberLiteral: `{{value}}`,
+        trueLiteral: "true",
+        falseLiteral: "false",
+        nullLiteral: "null",
+        listLiteral: `[{{items}}]`,
+        listSeparator: ", ",
+    },
+    python: {
+        stringLiteral: `"{{value}}"`,
+        numberLiteral: `{{value}}`,
+        trueLiteral: "True",
+        falseLiteral: "False",
+        nullLiteral: "None",
+        listLiteral: `[{{items}}]`,
+        listSeparator: ", ",
+    },
+    java: {
+        stringLiteral: `"{{value}}"`,
+        numberLiteral: `{{value}}`,
+        trueLiteral: "true",
+        falseLiteral: "false",
+        nullLiteral: "null",
+        // Fern's Java codegen emits `Arrays.asList(...)` for list literals,
+        // so the consumer matches that convention rather than `List.of(...)`.
+        listLiteral: `Arrays.asList({{items}})`,
+        listSeparator: ", ",
+    },
+};
 
 export function findTemplateMatch(
     httpMethod: string,
@@ -129,6 +165,7 @@ export function buildManifest(
             specCommit: metadata.originGitCommit || "unknown",
             generatorName: metadata.generatorName,
         },
+        renderRules: RENDER_RULES_BY_LANGUAGE[language],
         examples: {},
     };
 
@@ -162,6 +199,7 @@ export function buildManifest(
                 response,
                 sdkCallSource: example.sdkCallSource,
             };
+            if (endpoint.renderSchema) candidate.render = endpoint.renderSchema;
             // Multiple wire tests can target the same endpoint (success +
             // variants, or — like the python fixture — a test that omits
             // kwargs to exercise an unrelated parser path). Prefer the

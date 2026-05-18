@@ -114,6 +114,13 @@ export {
 } from "./utils";
 export { createTypeScriptParser, tsExtractEndpoints, tsExtractTestExamples } from "./parsers/typescript";
 export {
+    buildTsRenderSchema,
+    tsExtractMethodSignatureInfo,
+    tsInferKind,
+    tsParseRequestInterface,
+    tsResolveRequestInterfacePath,
+} from "./parsers/typescript-schema";
+export {
     createPythonParser,
     pyDeriveMethodChain,
     pyExtractBodyParamMap,
@@ -125,13 +132,37 @@ export {
     pyParseKwargs,
 } from "./parsers/python";
 export {
+    buildPythonRenderSchema,
+    pyExtractEnumValues,
+    pyExtractHeaderKwargs,
+    pyExtractMethodKwargs,
+    pyInferKind,
+    pyParseSignatureKwargs,
+    pyStripOptional,
+    pyUnwrapList,
+} from "./parsers/python-schema";
+export {
+    buildJavaRenderSchema,
     createJavaParser,
     javaBuildAccessorMap,
+    javaClassifySignatureParams,
     javaCountBraceDelta,
     javaDeriveMethodChain,
     javaExtractConcatenatedString,
     javaExtractEndpoints,
     javaExtractSetBody,
     javaExtractTestExamples,
+    javaParseSignatureParams,
     javaUnescape,
 } from "./parsers/java";
+export {
+    buildJavaBodySchema,
+    findJavaClassFile,
+    inferKind as inferJavaKind,
+    parseJavaClass,
+    parseJavaEnumValues,
+    parseJavaFieldDeclarations,
+    parseJavaJsonIgnoredFields,
+    parseJavaJsonProperties,
+    parseJavaStagedBuilderOrder,
+} from "./parsers/java-request-class";

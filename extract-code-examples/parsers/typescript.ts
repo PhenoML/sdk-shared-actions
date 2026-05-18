@@ -2,6 +2,7 @@ import * as ts from "typescript";
 import * as fs from "fs";
 import * as path from "path";
 import type { EndpointMapping, LanguageParser, TestExample } from "../types";
+import { buildTsRenderSchema, createTsParseCaches } from "./typescript-schema";
 import { findFiles, normalizePathParams } from "../utils";
 
 export function createTypeScriptParser(): LanguageParser {
@@ -11,8 +12,12 @@ export function createTypeScriptParser(): LanguageParser {
         parseEndpoints(rootDir: string): EndpointMapping[] {
             const clientFiles = findFiles(path.join(rootDir, "src/api/resources"), /\/client\/Client\.ts$/);
             const endpoints: EndpointMapping[] = [];
+            const caches = createTsParseCaches();
             for (const file of clientFiles) {
                 const fileEndpoints = tsExtractEndpoints(file);
+                for (const ep of fileEndpoints) {
+                    ep.renderSchema = buildTsRenderSchema(ep, file, caches);
+                }
                 endpoints.push(...fileEndpoints);
                 console.error(`  ${path.relative(rootDir, file)}: ${fileEndpoints.length} endpoints`);
             }
