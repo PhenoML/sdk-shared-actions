@@ -91,7 +91,12 @@ function renderValue(value, field):
   if value === null:    return manifest.renderRules.nullLiteral
   if typeof value === "boolean": return value ? renderRules.trueLiteral : renderRules.falseLiteral
   if typeof value === "number":  return renderRules.numberLiteral.replace("{{value}}", value)
-  if typeof value === "string":  return renderRules.stringLiteral.replace("{{value}}", jsonEscape(value))
+  if typeof value === "string":
+    if field.kind === "enum" and field.enumConstants?.[value]:
+      // Typed-enum languages (Java, TS) — use the language constant
+      // expression so the rendered call typechecks.
+      return field.enumConstants[value]
+    return renderRules.stringLiteral.replace("{{value}}", jsonEscape(value))
   if isArray(value):
     items = value.map(v => renderValue(v, field.items)).join(renderRules.listSeparator)
     return renderRules.listLiteral.replace("{{items}}", items)
@@ -122,7 +127,7 @@ Every entry — body field or path/query param — carries `kind` and `required`
 | `string`  | —                       | Substitute the (JSON-escaped) string into `renderRules.stringLiteral`     |
 | `number`  | —                       | Substitute the numeric text into `renderRules.numberLiteral`              |
 | `boolean` | —                       | Use `renderRules.trueLiteral` / `falseLiteral`                            |
-| `enum`    | `enumValues: string[]`  | Render as `string`; surface `enumValues` to UI for dropdowns              |
+| `enum`    | `enumValues: string[]`, `enumConstants?: Record<wire, expr>` | When `enumConstants[value]` is set, emit that expression verbatim (e.g. `AgentRole.ASSISTANT`); otherwise fall back to `string` rendering. Always surface `enumValues` to UI for dropdowns |
 | `list`    | `items: SchemaField`    | Render each element via `items`, join with `listSeparator`, wrap via `listLiteral` |
 | `object`  | `nested?: BodySchema`   | Recurse into `nested` if present; see "Untyped object fallback" below     |
 
@@ -187,6 +192,14 @@ test happened to populate — that's the *example*, not the schema.
 Python nested-type resolution would require parsing the imported Pydantic
 model file; consumers should fall back to language-native JSON-object
 rendering for `kind: "object"` fields whose `nested` is absent.
+
+#### Per-language `enumConstants` population
+
+| Language    | Populated?         | Shape                                                                  |
+|-------------|--------------------|------------------------------------------------------------------------|
+| Java        | Always for enums   | `{wire: "EnumName.CONSTANT"}` (e.g. `AgentRole.ASSISTANT`)             |
+| TypeScript  | Always for enums   | `{wire: "Namespace.Type.Key"}` (e.g. `AgentChatRequest.Role.Assistant`)|
+| Python      | Absent             | Wire-string substitution into `stringLiteral` is the correct render — Pydantic accepts the raw value |
 
 ## Development
 

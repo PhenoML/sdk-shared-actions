@@ -20,15 +20,27 @@ export interface TsFieldInfo {
     isOptional: boolean;    // `name?:` syntax → field has no required marker
 }
 
+// One entry from a namespace-const `as const` object. The key is the
+// PascalCase identifier (`Assistant`); the wire value is the string the
+// key maps to (`"assistant"`). Both halves are needed so a TS renderer
+// can emit `AgentChatRequest.Role.Assistant` instead of a bare string —
+// the latter doesn't satisfy the namespace-typed property's signature.
+export interface TsEnumEntry {
+    key: string;
+    wireValue: string;
+}
+
 export interface TsInterfaceInfo {
     interfaceName: string;
     filePath: string;
     fields: TsFieldInfo[];
     // String-literal union values declared inline in the same file under
     // `export namespace XxxRequest { export const Foo = {...} as const; ... }`
-    // — keyed by the type name (e.g. "Resource"). Used to surface enum-like
-    // fields with their wire values.
-    enums: Map<string, string[]>;
+    // — keyed by the type name (e.g. "Role"). Entries carry both the
+    // PascalCase const key and its wire value so the schema can surface
+    // both UI dropdown values AND `<Namespace>.<Type>.<Key>` rendering
+    // expressions.
+    enums: Map<string, TsEnumEntry[]>;
 }
 
 // Across-call caches keep the TS parser efficient: Client.ts is parsed
@@ -125,12 +137,30 @@ function tsToSchemaField(
     if (field.kind === "list") {
         field.items = tsListItemField(tsUnwrapList(f.typeText), owner, caches, visited);
     } else if (field.kind === "enum") {
-        field.enumValues = tsResolveEnumValues(f.typeText, owner);
+        applyTsEnum(field, f.typeText, owner);
     } else if (field.kind === "object") {
         const nested = tsResolveNestedInterface(f.typeText, owner, caches, visited);
         if (nested) field.nested = tsBuildNestedBody(nested, caches, visited);
     }
     return field;
+}
+
+// Populate enum-related fields on a SchemaField whose type resolved to a
+// namespace-const declaration. `enumValues` lists wire strings for UI
+// dropdowns; `enumConstants` maps each wire value to its TS expression
+// (e.g. `AgentChatRequest.Role.Assistant`) so the renderer can satisfy
+// the namespace-typed property without a typecheck failure.
+function applyTsEnum(field: SchemaField, typeText: string, owner: TsInterfaceInfo): void {
+    const lastSeg = typeText.split(".").pop()?.split("<")[0]?.trim() ?? "";
+    const entries = owner.enums.get(lastSeg);
+    if (!entries) return;
+    field.enumValues = entries.map((e) => e.wireValue);
+    // The TS expression is the property's full type reference plus the
+    // const key (`AgentChatRequest.Role` + `.Assistant`). `typeText` already
+    // carries any namespace prefix.
+    field.enumConstants = Object.fromEntries(
+        entries.map((e) => [e.wireValue, `${typeText.trim()}.${e.key}`]),
+    );
 }
 
 // Synthesize a SchemaField for one list element. Mirrors the top-level
@@ -152,7 +182,7 @@ function tsListItemField(
     if (kind === "list") {
         item.items = tsListItemField(tsUnwrapList(itemType), owner, caches, visited);
     } else if (kind === "enum") {
-        item.enumValues = tsResolveEnumValues(itemType, owner);
+        applyTsEnum(item, itemType, owner);
     } else if (kind === "object") {
         const nested = tsResolveNestedInterface(itemType, owner, caches, visited);
         if (nested) item.nested = tsBuildNestedBody(nested, caches, visited);
@@ -207,7 +237,7 @@ function tsResolveNestedInterface(
 // references that resolve to local enum-shaped `as const` objects.
 export function tsInferKind(
     typeText: string,
-    enums: Map<string, string[]>,
+    enums: Map<string, TsEnumEntry[]>,
 ): SchemaFieldKind {
     const t = typeText.trim();
     if (/^string$/.test(t) || /^Date$/.test(t)) return "string";
@@ -231,10 +261,6 @@ function tsUnwrapList(typeText: string): string {
     return "unknown";
 }
 
-function tsResolveEnumValues(typeText: string, owner: TsInterfaceInfo): string[] | undefined {
-    const lastSeg = typeText.split(".").pop()?.split("<")[0]?.trim() ?? "";
-    return owner.enums.get(lastSeg);
-}
 
 export interface TsSignatureInfo {
     // Trailing request-object parameter's type name (`phenoml.tools.CohortRequest`
@@ -391,7 +417,7 @@ export function tsParseRequestInterface(filePath: string): TsInterfaceInfo | nul
 
     let interfaceName: string | null = null;
     const fields: TsFieldInfo[] = [];
-    const enums = new Map<string, string[]>();
+    const enums = new Map<string, TsEnumEntry[]>();
 
     function visit(node: ts.Node) {
         if (ts.isInterfaceDeclaration(node)) {
@@ -426,16 +452,21 @@ export function tsParseRequestInterface(filePath: string): TsInterfaceInfo | nul
     return { interfaceName, filePath, fields, enums };
 }
 
-// Recognize `{ Foo: "foo", Bar: "bar" } as const` and return the literal
-// values. Anything else returns null.
-function tsExtractAsConstObject(node: ts.Expression): string[] | null {
+// Recognize `{ Foo: "foo", Bar: "bar" } as const` and return the entries
+// as (key, wireValue) pairs. Returns null when the expression doesn't
+// match the namespace-const shape.
+function tsExtractAsConstObject(node: ts.Expression): TsEnumEntry[] | null {
     let inner = node;
     if (ts.isAsExpression(inner)) inner = inner.expression;
     if (!ts.isObjectLiteralExpression(inner)) return null;
-    const values: string[] = [];
+    const entries: TsEnumEntry[] = [];
     for (const prop of inner.properties) {
         if (!ts.isPropertyAssignment(prop)) continue;
-        if (ts.isStringLiteral(prop.initializer)) values.push(prop.initializer.text);
+        const key = tsPropertyNameText(prop.name);
+        if (!key) continue;
+        if (ts.isStringLiteral(prop.initializer)) {
+            entries.push({ key, wireValue: prop.initializer.text });
+        }
     }
-    return values.length > 0 ? values : null;
+    return entries.length > 0 ? entries : null;
 }

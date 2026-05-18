@@ -1040,11 +1040,19 @@ describe("TypeScript parser (Summary client fixture)", () => {
 
     test("renderSchema exposes namespace-const enums via enumValues", () => {
         // `role?: AgentChatRequest.Role` resolves to the sibling namespace's
-        // `const Role = { Assistant: "assistant", ... } as const`.
+        // `const Role = { Assistant: "assistant", ... } as const`. The wire
+        // values feed UI dropdowns; the namespace-qualified expressions
+        // (`AgentChatRequest.Role.Assistant`) feed renderers — without them,
+        // a `.role("assistant")` render wouldn't satisfy the property's
+        // namespace-typed signature.
         const chat = endpoints.find((e) => e.methodName === "chat")!;
         const role = chat.renderSchema?.body?.fields.find((f) => f.jsonKey === "role");
         expect(role?.kind).toBe("enum");
         expect(role?.enumValues).toEqual(["assistant", "reviewer"]);
+        expect(role?.enumConstants).toEqual({
+            "assistant": "AgentChatRequest.Role.Assistant",
+            "reviewer": "AgentChatRequest.Role.Reviewer",
+        });
     });
 
     test("renderSchema recognizes list types and recurses into items", () => {
@@ -1134,7 +1142,10 @@ describe("typescript-schema helpers", () => {
         ]);
         expect(info?.fields.find((f) => f.jsonKey === "message")?.isOptional).toBe(false);
         expect(info?.fields.find((f) => f.jsonKey === "role")?.isOptional).toBe(true);
-        expect(info?.enums.get("Role")).toEqual(["assistant", "reviewer"]);
+        expect(info?.enums.get("Role")).toEqual([
+            { key: "Assistant", wireValue: "assistant" },
+            { key: "Reviewer", wireValue: "reviewer" },
+        ]);
     });
 });
 
@@ -1539,7 +1550,10 @@ describe("parseJavaStagedBuilderOrder", () => {
 });
 
 describe("parseJavaEnumValues", () => {
-    test("captures wire values from Fern enum constructors", () => {
+    test("captures constant-name / wire-value pairs from Fern enum constructors", () => {
+        // Both halves are needed: the wire value (`assistant`) matches the
+        // serialized request body, the constant name (`ASSISTANT`) is what a
+        // Java renderer must type into the SDK call as `AgentRole.ASSISTANT`.
         const source = `
             public enum AgentRole {
                 ASSISTANT("assistant"),
@@ -1548,8 +1562,10 @@ describe("parseJavaEnumValues", () => {
                 AgentRole(String value) { this.value = value; }
             }
         `;
-        expect(parseJavaEnumValues(source)).toContain("assistant");
-        expect(parseJavaEnumValues(source)).toContain("reviewer");
+        expect(parseJavaEnumValues(source)).toEqual([
+            { constantName: "ASSISTANT", wireValue: "assistant" },
+            { constantName: "REVIEWER", wireValue: "reviewer" },
+        ]);
     });
 });
 
@@ -1594,6 +1610,14 @@ describe("Java parser (rich schema fixture)", () => {
         expect(fields[0]).toMatchObject({ kind: "string", required: true });
         expect(fields[1]).toMatchObject({ kind: "enum", required: true });
         expect(fields[1].enumValues).toEqual(["assistant", "reviewer", "custom"]);
+        // Java enum setters take the enum type, so the renderer needs the
+        // `EnumName.CONSTANT` expression — emitting `.role("assistant")`
+        // would fail to compile.
+        expect(fields[1].enumConstants).toEqual({
+            "assistant": "AgentRole.ASSISTANT",
+            "reviewer": "AgentRole.REVIEWER",
+            "custom": "AgentRole.CUSTOM",
+        });
         expect(fields[2]).toMatchObject({ kind: "list", required: false });
         expect(fields[2].items).toMatchObject({ kind: "string" });
         // List-of-object recurses into the Tag class's field catalog.

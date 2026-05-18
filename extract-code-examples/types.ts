@@ -121,6 +121,9 @@ export interface ParamField {
     kind: SchemaFieldKind;
     // Populated when `kind === "enum"`. Same semantics as SchemaField.enumValues.
     enumValues?: string[];
+    // Same semantics as SchemaField.enumConstants — when present, lets the
+    // consumer render typed enum constants instead of bare string literals.
+    enumConstants?: Record<string, string>;
 }
 
 export interface BodySchema {
@@ -153,8 +156,17 @@ export interface SchemaField {
     // Set when `kind === "list"`. Describes a single list item; the
     // consumer applies it once per element.
     items?: SchemaField;
-    // Set when `kind === "enum"`. Lists allowed values for UI dropdowns.
+    // Set when `kind === "enum"`. Lists allowed wire values for UI dropdowns.
     enumValues?: string[];
+    // Per-wire-value language-specific constant expression for enum fields.
+    // Populated when the language requires a typed reference (Java's
+    // `AgentRole.ASSISTANT`, TS's `AgentChatRequest.Role.Assistant`); absent
+    // for Python where the wire string itself is accepted. The consumer's
+    // renderer prefers `enumConstants[value]` over `stringLiteral`-quoting
+    // when both are available — without this, a Java setter like
+    // `.role(AgentRole role)` would receive `.role("assistant")` which
+    // doesn't typecheck.
+    enumConstants?: Record<string, string>;
 }
 
 export type SchemaFieldKind =

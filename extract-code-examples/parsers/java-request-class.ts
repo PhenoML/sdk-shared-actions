@@ -34,8 +34,9 @@ export interface JavaClassInfo {
     // FQN imports parsed from the file, so callers can resolve nested type
     // names (e.g. `List<Tag>` → `com.phenoml.api.resources.tools.types.Tag`).
     imports: Map<string, string>;
-    // For enum classes, the literal values; absent for object classes.
-    enumValues?: string[];
+    // For enum classes, the constant-name / wire-value pairs; absent for
+    // object classes. Order matches declaration order in the source.
+    enumConstants?: JavaEnumConstant[];
 }
 
 // Build a (possibly nested) `BodySchema` for a Fern Java request class.
@@ -109,14 +110,26 @@ function toSchemaField(
         // inferKind only sees the type name — it can't distinguish a Fern
         // enum from a regular class. Resolve the file and reclassify.
         const resolved = resolveNestedClass(f.innerType, owner, visited);
-        if (resolved?.enumValues) {
-            field.kind = "enum";
-            field.enumValues = resolved.enumValues;
+        if (resolved?.enumConstants) {
+            applyJavaEnum(field, resolved);
         } else if (resolved) {
             field.nested = buildJavaBodySchema(resolved, { visited });
         }
     }
     return field;
+}
+
+// Promote a field that resolved to a Java enum class. Carries both the
+// wire-value list (for UI dropdowns) AND the `EnumName.CONSTANT`
+// expressions a Java renderer must emit — otherwise `.role("assistant")`
+// goes out, which fails to typecheck against `role(AgentRole role)`.
+function applyJavaEnum(field: SchemaField, resolved: JavaClassInfo): void {
+    if (!resolved.enumConstants) return;
+    field.kind = "enum";
+    field.enumValues = resolved.enumConstants.map((c) => c.wireValue);
+    field.enumConstants = Object.fromEntries(
+        resolved.enumConstants.map((c) => [c.wireValue, `${resolved.className}.${c.constantName}`]),
+    );
 }
 
 // Build a synthetic SchemaField representing one element of a list. Reuses
@@ -138,9 +151,8 @@ function listItemField(
         item.items = listItemField(unwrapList(itemType), owner, visited);
     } else if (item.kind === "object") {
         const resolved = resolveNestedClass(itemType, owner, visited);
-        if (resolved?.enumValues) {
-            item.kind = "enum";
-            item.enumValues = resolved.enumValues;
+        if (resolved?.enumConstants) {
+            applyJavaEnum(item, resolved);
         } else if (resolved) {
             item.nested = buildJavaBodySchema(resolved, { visited });
         }
@@ -263,7 +275,7 @@ export function parseJavaClass(filePath: string): JavaClassInfo | null {
             requiredOrder: [],
             imports,
             ignoredFields: new Set(),
-            enumValues: parseJavaEnumValues(source),
+            enumConstants: parseJavaEnumValues(source),
         };
     }
 
@@ -391,20 +403,32 @@ export function parseJavaJsonIgnoredFields(source: string): Set<string> {
     return out;
 }
 
-// Pull `VALUE_NAME("wire-value")` or `VALUE_NAME` entries from an enum body.
-// Fern emits `@JsonValue` getters; the wire value is the constructor arg.
-export function parseJavaEnumValues(source: string): string[] {
+// One enum constant pair pulled from a Java enum body: the Java constant
+// name (`ASSISTANT`) and its wire value (`assistant`, from the constructor
+// arg). When Fern omits the constructor arg the two are the same string.
+export interface JavaEnumConstant {
+    constantName: string;
+    wireValue: string;
+}
+
+// Pull `VALUE_NAME("wire-value")` or `VALUE_NAME` entries from an enum body
+// as pairs. Fern emits `@JsonValue` getters that return the constructor
+// arg, so the wire value differs from the constant name in lowercase-
+// hyphenated APIs (`ASSISTANT("assistant")`). Schema consumers need both:
+// the wire value goes on the manifest body for matching, the constant
+// name is what a Java/TS renderer types into the SDK call.
+export function parseJavaEnumValues(source: string): JavaEnumConstant[] {
     const enumBlock = source.match(/enum\s+\w+\s*[\s\S]*?\{([\s\S]*?)(?:;|\})/);
     if (!enumBlock) return [];
     const body = enumBlock[1];
-    const out: string[] = [];
+    const out: JavaEnumConstant[] = [];
     // Match either `NAME("wire")` (Fern's pattern) or bare `NAME`.
     const pattern = /\b([A-Z][A-Z0-9_]*)\s*(?:\(\s*"([^"]+)"\s*\))?/g;
     for (const m of body.matchAll(pattern)) {
         // Filter out anything that's plainly not an enum constant (Java
         // keywords, modifier-y noise that survives the regex).
         if (m[1].length === 0) continue;
-        out.push(m[2] ?? m[1]);
+        out.push({ constantName: m[1], wireValue: m[2] ?? m[1] });
     }
     return out;
 }
