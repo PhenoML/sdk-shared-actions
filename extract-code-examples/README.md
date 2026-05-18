@@ -135,10 +135,38 @@ function renderValue(value, field):
 
 | Construct           | TypeScript                                | Python                     | Java                                |
 |---------------------|-------------------------------------------|----------------------------|-------------------------------------|
-| Call wrapper        | `client.x.method({ {{__body__}} })`       | `client.x.method({{__body__}})` | `client.x().method(RequestClass.builder(){{__body__}}.build())` |
+| Call wrapper        | `client.x.method({{path_param}}, { {{__body__}} })` | `client.x.method({{__body__}})` | `client.x().method({{path_param}}, RequestClass.builder(){{__body__}}.build())` |
 | `fieldSeparator`    | `", "`                                    | `", "`                     | `""` (each field begins with `.`)   |
 | `fieldTemplate`     | `"key": {{value}}`                        | `key={{value}}`            | `.setter({{value}})`                |
-| Path params         | inside body schema                        | inside body schema (kwargs) | `params[]` (positional)             |
+| Path params         | `params[]` (positional, before body)      | inside body schema (kwargs) | `params[]` (positional, before body) |
+
+#### Schema completeness
+
+The `render.body.fields` catalog is **spec-full** — it lists every field the
+SDK type allows, regardless of whether the captured example body sets them.
+Each parser reads the type definition on disk:
+
+- **Java**: opens the request class file (`CohortRequest.java`), pulls every `private final` declaration plus its `@JsonProperty` / `@JsonIgnore` annotation.
+- **Python**: parses the raw client method signature for all typed kwargs.
+- **TypeScript**: parses the request interface (`CohortRequest.ts`) for all property signatures via the TS compiler API.
+
+A field like summary's `template_id` that's only meaningful in certain
+request modes will still appear in the catalog (with `required: false`),
+so a consumer override can introduce it via add/remove rendering.
+
+The `example.request.body` field, by contrast, only shows what the wire
+test happened to populate — that's the *example*, not the schema.
+
+#### Nested object recursion
+
+| Kind                          | TypeScript | Python | Java |
+|-------------------------------|------------|--------|------|
+| `kind: "object"` (nested type) | `nested` schema if the type resolves to a sibling `<resource>/types/<Name>.ts` | Untyped (falls back to JSON-object literal rendering) | `nested` schema if the type resolves to a sibling class file |
+| `kind: "list"` of objects     | `items.nested` populated when item type resolves | `items.kind: "object"` only (no nested schema) | `items.nested` populated when item type resolves |
+
+Python nested-type resolution would require parsing the imported Pydantic
+model file; consumers should fall back to language-native JSON-object
+rendering for `kind: "object"` fields whose `nested` is absent.
 
 ## Development
 

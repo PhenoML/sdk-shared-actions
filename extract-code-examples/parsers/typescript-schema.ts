@@ -4,10 +4,12 @@ import * as ts from "typescript";
 import type {
     BodySchema,
     EndpointMapping,
+    ParamField,
     RenderSchema,
     SchemaField,
     SchemaFieldKind,
 } from "../types";
+import { camelToSnake } from "../utils";
 
 // Per-field info pulled from a Fern-generated TS request interface. Field
 // ordering follows interface declaration order; required/optional is the
@@ -42,20 +44,25 @@ export function createTsParseCaches(): TsParseCaches {
 }
 
 // Build a RenderSchema for one TS endpoint. Reads the request interface,
-// strips header-only fields (identified by the private __method's
-// destructuring), and emits an object-literal BodySchema. callTemplate has
-// the shape `client.<chain>.<method>({ {{__body__}} })` — TS Fern clients
-// always pass a single request object.
+// strips header-only fields (from the private __method's destructuring),
+// and emits an object-literal BodySchema. Fern TS signatures place path
+// params positionally BEFORE the request-object kwarg
+// (`searchSemantic(codesystem, { text: ... })`); the callTemplate
+// interleaves `{{name}}` placeholders accordingly.
 export function buildTsRenderSchema(
     endpoint: EndpointMapping,
     clientFile: string,
     caches?: TsParseCaches,
 ): RenderSchema {
-    const callTemplate = tsCallTemplate(endpoint);
-    const fallback: RenderSchema = { callTemplate, params: [] };
-
     const sigInfo = tsExtractMethodSignatureInfo(clientFile, endpoint.methodName, caches);
-    if (!sigInfo || !sigInfo.requestTypeName) return fallback;
+    const params: ParamField[] = (sigInfo?.positionalParams ?? []).map((p) => ({
+        name: camelToSnake(p.name),
+        kind: p.kind,
+    }));
+    const callTemplate = tsCallTemplate(endpoint, params, !!sigInfo?.requestTypeName);
+    const fallback: RenderSchema = { callTemplate, params };
+
+    if (!sigInfo?.requestTypeName) return fallback;
 
     const interfaceFile = tsResolveRequestInterfacePath(clientFile, sigInfo.requestTypeName);
     if (!interfaceFile) return fallback;
@@ -66,11 +73,11 @@ export function buildTsRenderSchema(
     const fields: SchemaField[] = [];
     for (const f of info.fields) {
         if (sigInfo.headerKeys.has(f.jsonKey)) continue;
-        fields.push(tsToSchemaField(f, info));
+        fields.push(tsToSchemaField(f, info, caches));
     }
     if (fields.length === 0) return fallback;
 
-    return { callTemplate, params: [], body: { fieldSeparator: ", ", fields } };
+    return { callTemplate, params, body: { fieldSeparator: ", ", fields } };
 }
 
 function tsParseRequestInterfaceCached(
@@ -93,13 +100,20 @@ function tsGetSourceFile(filePath: string, caches?: TsParseCaches): ts.SourceFil
     return sf;
 }
 
-function tsCallTemplate(endpoint: EndpointMapping): string {
+function tsCallTemplate(endpoint: EndpointMapping, params: ParamField[], hasBody: boolean): string {
     const accessors = endpoint.methodChain.slice(0, -1);
     const chainStr = ["client", ...accessors].join(".") + "." + endpoint.methodName;
-    return `${chainStr}({ {{__body__}} })`;
+    const positional = params.map((p) => `{{${p.name}}}`);
+    const args = hasBody ? [...positional, "{ {{__body__}} }"] : positional;
+    return `${chainStr}(${args.join(", ")})`;
 }
 
-function tsToSchemaField(f: TsFieldInfo, owner: TsInterfaceInfo): SchemaField {
+function tsToSchemaField(
+    f: TsFieldInfo,
+    owner: TsInterfaceInfo,
+    caches?: TsParseCaches,
+    visited?: Set<string>,
+): SchemaField {
     const field: SchemaField = {
         jsonKey: f.jsonKey,
         // Always quote — hyphenated keys (e.g. `X-Foo`) require it.
@@ -109,17 +123,83 @@ function tsToSchemaField(f: TsFieldInfo, owner: TsInterfaceInfo): SchemaField {
     };
 
     if (field.kind === "list") {
-        const inner = tsUnwrapList(f.typeText);
-        field.items = {
-            jsonKey: "",
-            fieldTemplate: "{{value}}",
-            kind: tsInferKind(inner, owner.enums),
-            required: true,
-        };
+        field.items = tsListItemField(tsUnwrapList(f.typeText), owner, caches, visited);
     } else if (field.kind === "enum") {
         field.enumValues = tsResolveEnumValues(f.typeText, owner);
+    } else if (field.kind === "object") {
+        const nested = tsResolveNestedInterface(f.typeText, owner, caches, visited);
+        if (nested) field.nested = tsBuildNestedBody(nested, caches, visited);
     }
     return field;
+}
+
+// Synthesize a SchemaField for one list element. Mirrors the top-level
+// kind decisions so nested arrays of objects (e.g. `fhir_resources:
+// Resource[]`) carry their full type catalog.
+function tsListItemField(
+    itemType: string,
+    owner: TsInterfaceInfo,
+    caches?: TsParseCaches,
+    visited?: Set<string>,
+): SchemaField {
+    const kind = tsInferKind(itemType, owner.enums);
+    const item: SchemaField = {
+        jsonKey: "",
+        fieldTemplate: "{{value}}",
+        kind,
+        required: true,
+    };
+    if (kind === "list") {
+        item.items = tsListItemField(tsUnwrapList(itemType), owner, caches, visited);
+    } else if (kind === "enum") {
+        item.enumValues = tsResolveEnumValues(itemType, owner);
+    } else if (kind === "object") {
+        const nested = tsResolveNestedInterface(itemType, owner, caches, visited);
+        if (nested) item.nested = tsBuildNestedBody(nested, caches, visited);
+    }
+    return item;
+}
+
+function tsBuildNestedBody(
+    info: TsInterfaceInfo,
+    caches?: TsParseCaches,
+    visited?: Set<string>,
+): BodySchema {
+    const seen = visited ?? new Set<string>();
+    seen.add(info.interfaceName);
+    const fields = info.fields.map((f) => tsToSchemaField(f, info, caches, seen));
+    return { fieldSeparator: ", ", fields };
+}
+
+// Resolve a type-name reference inside an interface to a parsed
+// TsInterfaceInfo on disk. Walks Fern's standard layout: a request
+// interface at `<resource>/client/requests/Foo.ts` references nested
+// types under `<resource>/types/Bar.ts`. Returns null when the type is
+// local, a primitive, or unresolvable. `visited` breaks cycles.
+function tsResolveNestedInterface(
+    typeText: string,
+    owner: TsInterfaceInfo,
+    caches?: TsParseCaches,
+    visited?: Set<string>,
+): TsInterfaceInfo | null {
+    const simple = typeText.trim().split(".").pop()?.split("<")[0]?.trim();
+    if (!simple) return null;
+    if (visited?.has(simple)) return null;
+    if (owner.enums.has(simple)) return null;
+    const ownerDir = path.dirname(owner.filePath);
+    // Probe Fern's known layouts in order of specificity. The two-dot
+    // candidates handle `client/requests/Foo.ts` → `<resource>/types/Bar.ts`.
+    const candidates = [
+        path.join(ownerDir, simple + ".ts"),
+        path.join(ownerDir, "..", "types", simple + ".ts"),
+        path.join(ownerDir, "..", "..", "types", simple + ".ts"),
+    ];
+    for (const c of candidates) {
+        if (fs.existsSync(c)) {
+            return tsParseRequestInterfaceCached(c, caches);
+        }
+    }
+    return null;
 }
 
 // Map a TS type expression to a SchemaFieldKind. Recognizes the shapes Fern
@@ -156,42 +236,96 @@ function tsResolveEnumValues(typeText: string, owner: TsInterfaceInfo): string[]
     return owner.enums.get(lastSeg);
 }
 
-// Extract, for one public method in a Client.ts:
-//   - the request type name (`phenoml.tools.CohortRequest` → "CohortRequest")
-//   - header keys destructured out of `request` in the private __method
-// Both signals are needed to compute the body composition.
+export interface TsSignatureInfo {
+    // Trailing request-object parameter's type name (`phenoml.tools.CohortRequest`
+    // → "CohortRequest"). Null when the method has no body parameter
+    // (e.g. a path-param-only GET with no query bundle).
+    requestTypeName: string | null;
+    // Path/query params declared positionally BEFORE the request object,
+    // in signature order. Fern places these first for endpoints whose URL
+    // template embeds path variables.
+    positionalParams: { name: string; kind: SchemaFieldKind }[];
+    // Property keys destructured out of `request` in the private __method
+    // body — those ship as headers and must be excluded from body.fields.
+    headerKeys: Set<string>;
+}
+
+// Extract path params, request type, and header destructuring for one
+// public method in a Client.ts. The request type is the LAST non-options
+// parameter; everything before it is positional (kind inferred from the
+// type expression). RequestOptions trailing params are ignored.
 export function tsExtractMethodSignatureInfo(
     clientFile: string,
     methodName: string,
     caches?: TsParseCaches,
-): { requestTypeName: string | null; headerKeys: Set<string> } | null {
+): TsSignatureInfo | null {
     const sf = tsGetSourceFile(clientFile, caches);
     if (!sf) return null;
     const source = sf.getFullText();
 
-    let requestTypeName: string | null = null;
-    const headerKeys = new Set<string>();
+    const info: TsSignatureInfo = {
+        requestTypeName: null,
+        positionalParams: [],
+        headerKeys: new Set(),
+    };
 
     function visit(node: ts.Node) {
         if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
             if (node.name.text === methodName) {
-                const firstParam = node.parameters[0];
-                if (firstParam?.type) {
-                    requestTypeName = tsTypeLastSegment(firstParam.type, source);
-                }
+                classifyTsSignatureParams(node.parameters, source, info);
             }
             if (node.name.text === `__${methodName}` && node.body) {
-                tsCollectDestructuredHeaderKeys(node.body, headerKeys);
+                tsCollectDestructuredHeaderKeys(node.body, info.headerKeys);
             }
         }
         ts.forEachChild(node, visit);
     }
     visit(sf);
-    return { requestTypeName, headerKeys };
+    return info;
 }
 
-// Walk a private __method body for `const {"X-Header": id, ..._body} =
-// request;` patterns and record the destructured (non-rest) keys.
+// Drop trailing `requestOptions?` then treat the last remaining param as
+// the request body (when its type ends in "Request"). All earlier params
+// are positional path/query args.
+function classifyTsSignatureParams(
+    params: ts.NodeArray<ts.ParameterDeclaration>,
+    source: string,
+    out: TsSignatureInfo,
+) {
+    const eligible = params.filter((p) => {
+        const typeName = p.type ? tsTypeLastSegment(p.type, source) : null;
+        return typeName !== "RequestOptions";
+    });
+    if (eligible.length === 0) return;
+
+    const last = eligible[eligible.length - 1];
+    const lastTypeName = last.type ? tsTypeLastSegment(last.type, source) : null;
+    const lastIsBody = lastTypeName !== null && /Request$/.test(lastTypeName);
+
+    const positionalParams = lastIsBody ? eligible.slice(0, -1) : eligible;
+    for (const p of positionalParams) {
+        if (!ts.isIdentifier(p.name)) continue;
+        const typeText = p.type ? source.slice(p.type.pos, p.type.end).trim() : "string";
+        out.positionalParams.push({ name: p.name.text, kind: tsInferParamKind(typeText) });
+    }
+    if (lastIsBody) out.requestTypeName = lastTypeName;
+}
+
+// Path/query params are scalar; default to "string" when the type isn't
+// one of the few primitives Fern surfaces positionally.
+function tsInferParamKind(typeText: string): SchemaFieldKind {
+    const t = typeText.trim();
+    if (/^number$/.test(t)) return "number";
+    if (/^boolean$/.test(t)) return "boolean";
+    return "string";
+}
+
+// Walk a private __method body for the `const {"X-Header": id, ..._body} =
+// request;` pattern Fern emits when forwarding headers and shipping the
+// remainder as body. The REST binding is the discriminator: destructures
+// without a `..._body` rest are used elsewhere (e.g. `const { version } =
+// request` extracts a single field for query params, NOT headers) — we
+// must not flag those keys as headers or they vanish from the body schema.
 function tsCollectDestructuredHeaderKeys(body: ts.Block, out: Set<string>) {
     function visit(node: ts.Node) {
         if (
@@ -201,10 +335,10 @@ function tsCollectDestructuredHeaderKeys(body: ts.Block, out: Set<string>) {
             ts.isIdentifier(node.initializer) &&
             node.initializer.text === "request"
         ) {
+            const hasRestBinding = node.name.elements.some((el) => !!el.dotDotDotToken);
+            if (!hasRestBinding) return;
             for (const el of node.name.elements) {
-                if (el.dotDotDotToken) continue; // The `..._body` rest binding
-                // Property name is the wire key (with hyphens etc.) when
-                // present; otherwise it matches the local binding name.
+                if (el.dotDotDotToken) continue;
                 const wire = el.propertyName
                     ? tsPropertyNameText(el.propertyName)
                     : (ts.isIdentifier(el.name) ? el.name.text : null);

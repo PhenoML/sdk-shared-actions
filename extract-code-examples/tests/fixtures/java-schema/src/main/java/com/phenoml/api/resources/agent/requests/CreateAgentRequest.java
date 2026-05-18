@@ -9,6 +9,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.phenoml.api.resources.agent.types.AgentRole;
+import com.phenoml.api.resources.agent.types.Tag;
 import java.util.List;
 import java.util.Optional;
 import org.jetbrains.annotations.NotNull;
@@ -23,6 +24,8 @@ public final class CreateAgentRequest {
 
     private final Optional<List<String>> tools;
 
+    private final Optional<List<Tag>> categories;
+
     private final Optional<String> description;
 
     private CreateAgentRequest(
@@ -30,11 +33,13 @@ public final class CreateAgentRequest {
             String name,
             AgentRole role,
             Optional<List<String>> tools,
+            Optional<List<Tag>> categories,
             Optional<String> description) {
         this.phenomlOnBehalfOf = phenomlOnBehalfOf;
         this.name = name;
         this.role = role;
         this.tools = tools;
+        this.categories = categories;
         this.description = description;
     }
 
@@ -58,6 +63,11 @@ public final class CreateAgentRequest {
         return tools;
     }
 
+    @JsonProperty("categories")
+    public Optional<List<Tag>> getCategories() {
+        return categories;
+    }
+
     @JsonProperty("description")
     public Optional<String> getDescription() {
         return description;
@@ -79,6 +89,8 @@ public final class CreateAgentRequest {
         CreateAgentRequest build();
         _FinalStage tools(Optional<List<String>> tools);
         _FinalStage tools(List<String> tools);
+        _FinalStage categories(Optional<List<Tag>> categories);
+        _FinalStage categories(List<Tag> categories);
         _FinalStage description(Optional<String> description);
         _FinalStage description(String description);
         _FinalStage phenomlOnBehalfOf(Optional<String> phenomlOnBehalfOf);
@@ -89,6 +101,7 @@ public final class CreateAgentRequest {
         private String name;
         private AgentRole role;
         private Optional<List<String>> tools = Optional.empty();
+        private Optional<List<Tag>> categories = Optional.empty();
         private Optional<String> description = Optional.empty();
         private Optional<String> phenomlOnBehalfOf = Optional.empty();
 
@@ -98,13 +111,15 @@ public final class CreateAgentRequest {
         public _FinalStage role(@NotNull AgentRole role) { this.role = role; return this; }
         public _FinalStage tools(List<String> tools) { this.tools = Optional.ofNullable(tools); return this; }
         public _FinalStage tools(Optional<List<String>> tools) { this.tools = tools; return this; }
+        public _FinalStage categories(List<Tag> categories) { this.categories = Optional.ofNullable(categories); return this; }
+        public _FinalStage categories(Optional<List<Tag>> categories) { this.categories = categories; return this; }
         public _FinalStage description(String description) { this.description = Optional.ofNullable(description); return this; }
         public _FinalStage description(Optional<String> description) { this.description = description; return this; }
         public _FinalStage phenomlOnBehalfOf(String value) { this.phenomlOnBehalfOf = Optional.ofNullable(value); return this; }
         public _FinalStage phenomlOnBehalfOf(Optional<String> value) { this.phenomlOnBehalfOf = value; return this; }
 
         public CreateAgentRequest build() {
-            return new CreateAgentRequest(phenomlOnBehalfOf, name, role, tools, description);
+            return new CreateAgentRequest(phenomlOnBehalfOf, name, role, tools, categories, description);
         }
     }
 }

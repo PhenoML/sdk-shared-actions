@@ -945,10 +945,11 @@ describe("TypeScript parser (Summary client fixture)", () => {
     const endpoints = parser.parseEndpoints(root);
     const examples = parser.parseTestExamples(root);
 
-    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming + chat endpoints", () => {
+    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming/chat/get endpoints", () => {
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /fhir2summary/template/{id}",
+            "GET /agent/{agent_id}",
             "GET /fhir2summary/template/{id}",
             "GET /fhir2summary/templates",
             "POST /agent/chat",
@@ -1021,8 +1022,20 @@ describe("TypeScript parser (Summary client fixture)", () => {
         const chat = endpoints.find((e) => e.methodName === "chat")!;
         expect(chat.renderSchema?.callTemplate).toBe("client.agent.chat({ {{__body__}} })");
         const fields = chat.renderSchema?.body?.fields ?? [];
-        expect(fields.map((f) => f.jsonKey)).toEqual(["message", "role", "tools"]);
+        expect(fields.map((f) => f.jsonKey)).toEqual(["message", "role", "tools", "categories"]);
         expect(fields.find((f) => f.jsonKey === "X-Phenoml-On-Behalf-Of")).toBeUndefined();
+    });
+
+    test("renderSchema recurses into list-of-object items via items.nested", () => {
+        // `categories?: Tag[]` should expose the Tag interface's fields
+        // (name, color) under items.nested so consumers can add/edit
+        // properties inside list elements.
+        const chat = endpoints.find((e) => e.methodName === "chat")!;
+        const categories = chat.renderSchema?.body?.fields.find((f) => f.jsonKey === "categories");
+        expect(categories?.kind).toBe("list");
+        expect(categories?.items?.kind).toBe("object");
+        const nestedKeys = categories?.items?.nested?.fields.map((f) => f.jsonKey) ?? [];
+        expect(nestedKeys).toEqual(["name", "color"]);
     });
 
     test("renderSchema exposes namespace-const enums via enumValues", () => {
@@ -1039,6 +1052,34 @@ describe("TypeScript parser (Summary client fixture)", () => {
         const tools = chat.renderSchema?.body?.fields.find((f) => f.jsonKey === "tools");
         expect(tools?.kind).toBe("list");
         expect(tools?.items?.kind).toBe("string");
+    });
+
+    test("renderSchema handles positional path params before the request object", () => {
+        // Fern emits `getAgent(agentId: string, request: SomeRequest)` for
+        // endpoints with URL templates. The path param goes into `params[]`
+        // (snake_cased to match URL templates), the request type still
+        // resolves and feeds body.fields. Earlier versions of the extractor
+        // grabbed `agentId: string` as the request type and emitted an empty
+        // body — this guards against that regression.
+        const getAgent = endpoints.find((e) => e.methodName === "getAgent")!;
+        expect(getAgent.renderSchema?.callTemplate).toBe(
+            "client.agent.getAgent({{agent_id}}, { {{__body__}} })",
+        );
+        expect(getAgent.renderSchema?.params).toEqual([
+            { name: "agent_id", kind: "string" },
+        ]);
+        const fields = getAgent.renderSchema?.body?.fields ?? [];
+        expect(fields.map((f) => f.jsonKey)).toEqual(["version"]);
+    });
+
+    test("renderSchema does NOT treat `const { x } = request` as a header destructure when no rest binding is present", () => {
+        // `__getAgent` does `const { version } = request;` to extract a
+        // query param — without a `..._body` rest binding. The destructure
+        // detector must require the rest binding to flag keys as headers,
+        // otherwise `version` would vanish from body.fields.
+        const getAgent = endpoints.find((e) => e.methodName === "getAgent")!;
+        const fields = getAgent.renderSchema?.body?.fields ?? [];
+        expect(fields.find((f) => f.jsonKey === "version")).toBeDefined();
     });
 
     test("renderSchema keeps body-shaped header keys when the method skips destructuring", () => {
@@ -1089,6 +1130,7 @@ describe("typescript-schema helpers", () => {
             "message",
             "role",
             "tools",
+            "categories",
         ]);
         expect(info?.fields.find((f) => f.jsonKey === "message")?.isOptional).toBe(false);
         expect(info?.fields.find((f) => f.jsonKey === "role")?.isOptional).toBe(true);
@@ -1548,13 +1590,18 @@ describe("Java parser (rich schema fixture)", () => {
         const keys = fields.map((f) => f.jsonKey);
         // Required (staged-builder order) before optionals; @JsonIgnore'd
         // header field (phenomlOnBehalfOf) excluded entirely.
-        expect(keys).toEqual(["name", "role", "tools", "description"]);
+        expect(keys).toEqual(["name", "role", "tools", "categories", "description"]);
         expect(fields[0]).toMatchObject({ kind: "string", required: true });
         expect(fields[1]).toMatchObject({ kind: "enum", required: true });
         expect(fields[1].enumValues).toEqual(["assistant", "reviewer", "custom"]);
         expect(fields[2]).toMatchObject({ kind: "list", required: false });
         expect(fields[2].items).toMatchObject({ kind: "string" });
-        expect(fields[3]).toMatchObject({ kind: "string", required: false });
+        // List-of-object recurses into the Tag class's field catalog.
+        expect(fields[3]).toMatchObject({ kind: "list", required: false });
+        expect(fields[3].items?.kind).toBe("object");
+        const tagKeys = fields[3].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
+        expect(tagKeys).toEqual(["name", "color"]);
+        expect(fields[4]).toMatchObject({ kind: "string", required: false });
     });
 
     test("fieldTemplate uses the camelCase setter name and {{value}} placeholder", () => {
@@ -1563,6 +1610,7 @@ describe("Java parser (rich schema fixture)", () => {
             ".name({{value}})",
             ".role({{value}})",
             ".tools({{value}})",
+            ".categories({{value}})",
             ".description({{value}})",
         ]);
         expect(createAgent.renderSchema?.body?.fieldSeparator).toBe("");

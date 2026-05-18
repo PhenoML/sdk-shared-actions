@@ -260,6 +260,9 @@ function pyToSchemaField(kw: PyKwarg, jsonKey: string): SchemaField {
     };
     if (kind === "list") {
         const inner = pyUnwrapList(kw.typeAnnotation);
+        // Nested item shape isn't resolved (would require parsing the
+        // imported Pydantic model file); consumers fall back to rendering
+        // object items as language-native JSON literals.
         field.items = {
             jsonKey: "",
             fieldTemplate: "{{value}}",

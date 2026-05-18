@@ -1,8 +1,11 @@
 // Synthetic fixture for the TS schema extractor. Exercises:
 //   - required + optional properties (the `?` suffix)
 //   - a string-literal-union enum exposed as a sibling namespace const
-//   - a list property (`tools: string[]`)
+//   - a list of scalars (`tools: string[]`)
+//   - a list of objects (`categories: Tag[]`) for nested-recursion coverage
 //   - a hyphenated header-style key
+
+import { Tag } from "../../types/Tag";
 
 export interface AgentChatRequest {
     /** Optional header — destructured out of `request` by the private __method. */
@@ -13,6 +16,8 @@ export interface AgentChatRequest {
     role?: AgentChatRequest.Role;
     /** Optional list of tool ids. */
     tools?: string[];
+    /** Optional list of tag objects (exercises items.nested). */
+    categories?: Tag[];
 }
 
 export namespace AgentChatRequest {
