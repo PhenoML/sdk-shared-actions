@@ -54,16 +54,18 @@ The output `code-examples.json` has shape:
     "POST /tools/cohort": {
       "httpMethod": "POST",
       "httpPath": "/tools/cohort",
-      "sdkMethodChain": ["tools", "analyzeCohort"],
-      "sdkMethodName": "analyzeCohort",
-      "request": { "body": { /* wire JSON */ }, "sdkCallArgs": [ /* call args */ ] },
-      "response": { "body": { /* wire JSON */ } },
-      "sdkCallSource": "client.tools().analyzeCohort(...)",   // for display
+      "request": { "body": { /* wire JSON — also the merge base for renderCall */ } },
+      "response": { "body": { /* wire JSON */ }, "streaming": false },
       "render": { /* dynamic render schema — see below */ }
     }
   }
 }
 ```
+
+The SDK method chain, method name, and call args that used to be on each
+example are all derivable from `render` and have been removed; recompose
+them by running `renderCall(example, example.request.body, {})` if a
+human-readable form is needed.
 
 ### Dynamic rendering
 

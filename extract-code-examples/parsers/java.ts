@@ -16,7 +16,7 @@ import {
     findJavaClassFile,
     parseJavaClass,
 } from "./java-request-class";
-import { camelToSnake, findFiles, isBalancedParens, normalizePath } from "../utils";
+import { camelToSnake, findFiles, normalizePath } from "../utils";
 
 // Per-@Test scan ceiling; also bounds nested SDK-call collection so an
 // unterminated expression can't consume the rest of the file.
@@ -579,7 +579,6 @@ export function javaExtractTestExamples(filePath: string, rootDir?: string): Tes
         if (!methodName) continue;
 
         let httpMethod: string | null = null;
-        let sdkCallSource = "";
         let requestBody: unknown = null;
         let responseBody: unknown = null;
         let mockResponseCount = 0;
@@ -616,26 +615,6 @@ export function javaExtractTestExamples(filePath: string, rootDir?: string): Tes
                     try { responseBody = JSON.parse(bodyStr); } catch { /* keep mock version */ }
                 }
             }
-
-            // SDK call: keep collecting while parens are unbalanced OR the
-            // next line is a `.chained()` continuation. A `;` after balance
-            // is a hard terminator (statement end).
-            const sdkMatch = line.match(/(client\.\w[\w.()]*\(.*)/);
-            if (sdkMatch && !sdkCallSource) {
-                sdkCallSource = sdkMatch[1];
-                for (let k = j + 1; k < Math.min(j + MAX_TEST_BODY_LINES, lines.length); k++) {
-                    const balanced = isBalancedParens(sdkCallSource);
-                    if (balanced && sdkCallSource.trimEnd().endsWith(";")) break;
-                    const nextTrimmed = lines[k].trim();
-                    if (!balanced || nextTrimmed.startsWith(".")) {
-                        sdkCallSource += "\n" + lines[k];
-                    } else {
-                        break;
-                    }
-                }
-                sdkCallSource = sdkCallSource.trim();
-                if (sdkCallSource.endsWith(";")) sdkCallSource = sdkCallSource.slice(0, -1);
-            }
         }
 
         if (httpMethod) {
@@ -647,7 +626,6 @@ export function javaExtractTestExamples(filePath: string, rootDir?: string): Tes
                 requestBody,
                 responseBody,
                 sdkCallArgs: [],
-                sdkCallSource,
             });
         }
     }

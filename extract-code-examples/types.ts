@@ -64,17 +64,15 @@ export interface TestExample {
     requestBody: unknown | null;
     responseBody: unknown | null;
     sdkCallArgs: unknown[];
-    sdkCallSource: string;
 }
 
 export interface CodeExample {
     httpMethod: string;
     httpPath: string;
-    sdkMethodChain: string[];
-    sdkMethodName: string;
     request: {
+        // Wire JSON body the test example supplied (derived from kwargs for
+        // Python). Consumers use this as the deep-merge base for renderCall.
         body: unknown | null;
-        sdkCallArgs: unknown[];
     };
     response: {
         body: unknown | null;
@@ -82,7 +80,6 @@ export interface CodeExample {
         // instead of treating the (null) body as a missing-example signal.
         streaming?: boolean;
     };
-    sdkCallSource: string;
     // Dynamic-render schema. Lets a consumer (e.g. docs playground) regenerate
     // the SDK call for any user-provided body without re-encoding language
     // semantics — see RenderSchema. Optional during phased per-language

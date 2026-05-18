@@ -1209,14 +1209,10 @@ describe("Python parser (Authtoken auth fixture)", () => {
 
     test("parseTestExamples scans past 60 lines of test body", () => {
         // The test_long_body fixture places its SDK call + verify_request_count
-        // at ~line 78. An earlier 60-line cap would silently drop this entry.
-        const longBody = examples.find(
-            (e) => e.httpMethod === "POST" && e.httpPath === "/v2/auth/token" && e.sdkCallSource.includes("client.authtoken.auth.get_token"),
-        );
-        expect(longBody).toBeDefined();
-        // Every fixture targeting /v2/auth/token should yield an example:
-        // test_authtoken_auth.py, test_long_body.py, and the two wrapped
-        // tests in test_multiline_verify.py (no truncation drops any).
+        // at ~line 78. An earlier 60-line cap would silently drop this entry,
+        // bringing the count to 3 instead of 4. Every fixture targeting
+        // /v2/auth/token should yield an example: test_authtoken_auth.py,
+        // test_long_body.py, and the two wrapped tests in test_multiline_verify.py.
         expect(examples.filter((e) => e.httpPath === "/v2/auth/token").length).toBe(4);
     });
 
@@ -1229,18 +1225,6 @@ describe("Python parser (Authtoken auth fixture)", () => {
         const wrappedB = examples.find((e) => e.methodName === "auth_get_token_wrapped_per_arg");
         expect(wrappedA).toMatchObject({ httpMethod: "POST", httpPath: "/v2/auth/token" });
         expect(wrappedB).toMatchObject({ httpMethod: "POST", httpPath: "/v2/auth/token" });
-    });
-
-    test("parseTestExamples strips the `for _ in ...:` wrapper from streaming tests", () => {
-        // Fern's Python generator wraps streaming calls in
-        // `for _ in client.foo(...): pass`. The captured sdkCallSource must
-        // be just the call expression — no `for` prefix, no trailing `:`.
-        const stream = examples.find((e) => e.sdkCallSource.includes("stream_chat"));
-        expect(stream).toBeDefined();
-        expect(stream!.sdkCallSource.startsWith("client.agent.stream_chat(")).toBe(true);
-        expect(stream!.sdkCallSource.endsWith(")")).toBe(true);
-        expect(stream!.sdkCallSource).not.toContain("for _ in");
-        expect(stream!.sdkCallSource).not.toContain("):");
     });
 
     test("parseTestExamples populates sdkCallArgs from the SDK call kwargs", () => {
@@ -1383,9 +1367,6 @@ describe("Java parser (AuthtokenAuth fixture)", () => {
         expect(ex.methodName).toBe("generateToken");
         expect(ex.requestBody).toEqual({ username: "username", password: "password" });
         expect(ex.responseBody).toEqual({ token: "token" });
-        // SDK call source is preserved with chained calls
-        expect(ex.sdkCallSource).toContain("client.authtoken()");
-        expect(ex.sdkCallSource).toContain(".generateToken(");
     });
 
     test("parseEndpoints captures the request class name from the method signature", () => {
@@ -1448,22 +1429,6 @@ describe("Java parser (streaming-endpoint fixture)", () => {
     test("flags methods returning `Iterable<...>` as streaming so the manifest doesn't surface the mock placeholder body", () => {
         const streamChat = endpoints.find((e) => e.methodName === "streamChat");
         expect(streamChat?.isStreaming).toBe(true);
-    });
-});
-
-describe("Java parser (deeply-nested builder fixture)", () => {
-    const root = path.join(FIXTURES, "java-deep-builder");
-    const examples = createJavaParser().parseTestExamples(root);
-
-    test("captures the entire SDK call expression even when it spans 40+ lines", () => {
-        // `.phenomlOnBehalfOf(` sits ~43 lines into the call, past the old cap.
-        expect(examples).toHaveLength(1);
-        const ex = examples[0];
-        expect(ex.sdkCallSource).toContain("client.fhir()");
-        expect(ex.sdkCallSource).toContain(".executeBundle(");
-        expect(ex.sdkCallSource).toContain(".phenomlOnBehalfOf(");
-        expect(isBalancedParens(ex.sdkCallSource)).toBe(true);
-        expect(ex.sdkCallSource.trimEnd().endsWith(")")).toBe(true);
     });
 });
 
@@ -1760,7 +1725,6 @@ describe("buildManifest chain-index", () => {
                 requestBody: { name: "x" },
                 responseBody: { id: "y" },
                 sdkCallArgs: [],
-                sdkCallSource: "client.agent().prompts().create(...)",
             },
         ];
         const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
@@ -1796,7 +1760,6 @@ describe("buildManifest chain-index", () => {
                 requestBody: null,
                 responseBody: null,
                 sdkCallArgs: [],
-                sdkCallSource: "",
             },
         ];
         const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
@@ -1826,7 +1789,6 @@ describe("buildManifest example-richness", () => {
         requestBody: null,
         responseBody: { ok: true },
         sdkCallArgs: [{ name: "name", value: "x" }],
-        sdkCallSource: 'client.foo.foo(name="x")',
     };
     const poor = {
         httpMethod: "POST",
@@ -1836,17 +1798,15 @@ describe("buildManifest example-richness", () => {
         requestBody: null,
         responseBody: null,
         sdkCallArgs: [],
-        sdkCallSource: "client.foo.foo()",
     };
 
     test("keeps the kwarg-bearing example when a later test has no kwargs", () => {
         // Bug: when fixture files sort such that a no-kwargs test comes
         // AFTER a kwargs-bearing test for the same endpoint, the later
         // (poorer) example used to overwrite the richer one, erasing the
-        // derived body and sdkCallArgs.
+        // derived body.
         const manifest = buildManifest([endpoint], [rich, poor], "python", "pkg", metadata);
         expect(manifest.examples["POST /foo"].request.body).toEqual({ name: "x" });
-        expect(manifest.examples["POST /foo"].request.sdkCallArgs).toEqual([{ name: "name", value: "x" }]);
     });
 
     test("rich example overrides an earlier poor one (order-independent)", () => {
@@ -1885,7 +1845,6 @@ describe("buildManifest streaming endpoints", () => {
                 requestBody: { message: "hi" },
                 responseBody: {},
                 sdkCallArgs: [],
-                sdkCallSource: "client.agent().streamChat(...)",
             },
         ];
         const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);
@@ -1914,7 +1873,6 @@ describe("buildManifest streaming endpoints", () => {
                 requestBody: { message: "hi" },
                 responseBody: { reply: "hello" },
                 sdkCallArgs: [],
-                sdkCallSource: "client.agent().chat(...)",
             },
         ];
         const manifest = buildManifest(endpoints, examples, "java", "pkg", metadata);

@@ -153,7 +153,6 @@ function tsExtractFromTestBody(
     let httpMethod: string | null = null;
     let httpPath: string | null = null;
     let sdkCallArgs: unknown[] = [];
-    let sdkCallSource = "";
 
     for (const stmt of body.statements) {
         if (ts.isVariableStatement(stmt)) {
@@ -168,11 +167,8 @@ function tsExtractFromTestBody(
                 }
                 // SDK call in variable assignment
                 if (decl.initializer) {
-                    const callInfo = tsExtractSdkCall(decl.initializer, fullSource);
-                    if (callInfo) {
-                        sdkCallArgs = callInfo.args;
-                        sdkCallSource = callInfo.source;
-                    }
+                    const args = tsExtractSdkCallArgs(decl.initializer, fullSource);
+                    if (args) sdkCallArgs = args;
                 }
             }
         }
@@ -183,16 +179,13 @@ function tsExtractFromTestBody(
                 httpMethod = mockInfo.method;
                 httpPath = mockInfo.path;
             }
-            const callInfo = tsExtractSdkCall(stmt.expression, fullSource);
-            if (callInfo) {
-                sdkCallArgs = callInfo.args;
-                sdkCallSource = callInfo.source;
-            }
+            const args = tsExtractSdkCallArgs(stmt.expression, fullSource);
+            if (args) sdkCallArgs = args;
         }
     }
 
     if (!httpMethod || !httpPath) return null;
-    return { httpMethod, httpPath, methodName, describeBlock, requestBody, responseBody, sdkCallArgs, sdkCallSource };
+    return { httpMethod, httpPath, methodName, describeBlock, requestBody, responseBody, sdkCallArgs };
 }
 
 function tsExtractMockEndpoint(node: ts.Node): { method: string; path: string } | null {
@@ -222,7 +215,7 @@ function tsExtractMockEndpoint(node: ts.Node): { method: string; path: string } 
     return findInChain(node);
 }
 
-function tsExtractSdkCall(node: ts.Node, fullSource: string): { args: unknown[]; source: string } | null {
+function tsExtractSdkCallArgs(node: ts.Node, fullSource: string): unknown[] | null {
     function findClientCall(n: ts.Node): ts.CallExpression | null {
         if (ts.isCallExpression(n)) {
             const chain = tsGetPropertyAccessChain(n.expression);
@@ -234,9 +227,7 @@ function tsExtractSdkCall(node: ts.Node, fullSource: string): { args: unknown[];
 
     const callExpr = findClientCall(node);
     if (!callExpr) return null;
-    const args = callExpr.arguments.map((arg) => tsEvalObjectLiteral(arg, fullSource));
-    const source = fullSource.slice(callExpr.pos, callExpr.end).trim();
-    return { args, source };
+    return callExpr.arguments.map((arg) => tsEvalObjectLiteral(arg, fullSource));
 }
 
 function tsGetPropertyAccessChain(node: ts.Node): string[] {

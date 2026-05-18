@@ -454,7 +454,6 @@ export function pyExtractTestExamples(
                 requestBody: null,
                 responseBody,
                 sdkCallArgs: sdkCallSource ? pyParseKwargs(sdkCallSource) : [],
-                sdkCallSource,
             });
         }
     }

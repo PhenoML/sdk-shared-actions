@@ -102,15 +102,14 @@ export function deriveBodyFromKwargs(
     return count > 0 ? body : null;
 }
 
-// Counts how many of {body, sdkCallArgs, responseBody, sdkCallSource}
-// carry data. Used to decide which of two examples for the same endpoint
-// should land in the manifest — higher score wins, ties keep the first.
+// Counts how many of {body, responseBody} carry data. Used to decide
+// which of two examples for the same endpoint should land in the manifest
+// — higher score wins, ties keep the first. The Python authtoken fixture
+// relies on this to pick the kwarg-bearing test over the body-less one.
 function codeExampleRichness(ex: CodeExample): number {
     let score = 0;
     if (ex.request.body !== null) score++;
-    if (ex.request.sdkCallArgs.length > 0) score++;
     if (ex.response.body !== null) score++;
-    if (ex.sdkCallSource) score++;
     return score;
 }
 
@@ -193,11 +192,8 @@ export function buildManifest(
             const candidate: CodeExample = {
                 httpMethod: endpoint.httpMethod,
                 httpPath: endpoint.httpPath,
-                sdkMethodChain: endpoint.methodChain,
-                sdkMethodName: endpoint.methodName,
-                request: { body, sdkCallArgs: example.sdkCallArgs },
+                request: { body },
                 response,
-                sdkCallSource: example.sdkCallSource,
             };
             if (endpoint.renderSchema) candidate.render = endpoint.renderSchema;
             // Multiple wire tests can target the same endpoint (success +
