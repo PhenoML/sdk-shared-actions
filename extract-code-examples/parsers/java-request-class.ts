@@ -220,7 +220,7 @@ export const JAVA_PRIMITIVE_KIND: Record<string, SchemaFieldKind> = {
 // as a primitive, list, or known wrapper is classified as "object"; the
 // resolver tries to load it from disk and reclassifies to "enum" when the
 // file turns out to be a Java enum.
-export function inferKind(rawType: string): SchemaFieldKind {
+function inferKind(rawType: string): SchemaFieldKind {
     const t = rawType.trim();
     if (/^(List|Set|Collection|Iterable|Sequence)\s*</.test(t)) return "list";
     const simple = t.replace(/<.*$/, "").trim();
@@ -464,7 +464,7 @@ export function parseJavaEnumValues(source: string): JavaEnumConstant[] {
 // Parse `import com.x.Y;` lines from a Java source file into a short→FQN
 // map. Skips wildcards and static imports. Used by both class-file parsing
 // and class-file lookup, so the regex lives in one place.
-export function parseJavaImports(source: string): Map<string, string> {
+function parseJavaImports(source: string): Map<string, string> {
     const out = new Map<string, string>();
     for (const m of source.matchAll(/^\s*import\s+(?!static\s)([\w.]+)\s*;/gm)) {
         const fqn = m[1];

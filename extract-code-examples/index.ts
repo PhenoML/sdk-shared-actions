@@ -158,7 +158,6 @@ export {
 export {
     buildJavaBodySchema,
     findJavaClassFile,
-    inferKind as inferJavaKind,
     parseJavaClass,
     parseJavaEnumValues,
     parseJavaFieldDeclarations,

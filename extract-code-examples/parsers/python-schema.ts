@@ -284,7 +284,7 @@ function pythonCallTemplate(endpoint: EndpointMapping): string {
 // Locate the raw_client.py file for an endpoint's method chain. The chain
 // excludes the "resources" intermediate directory Fern uses; we add it
 // back when looking up the file on disk.
-export function pythonRawClientFile(endpoint: EndpointMapping, pkgRoot: string): string | null {
+function pythonRawClientFile(endpoint: EndpointMapping, pkgRoot: string): string | null {
     const accessors = endpoint.methodChain.slice(0, -1);
     // Try the direct chain first, then with "resources" interleaved (which
     // is how Fern lays out nested sub-clients on disk).
