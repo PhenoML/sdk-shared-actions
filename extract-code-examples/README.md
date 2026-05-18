@@ -102,16 +102,20 @@ function renderValue(value, field):
         .filter(nf => nf.jsonKey in value)
         .map(nf => nf.fieldTemplate.replace("{{value}}", renderValue(value[nf.jsonKey], nf)))
         .join(field.nested.fieldSeparator)
-    // Fall back to language-native JSON-object rendering for untyped objects
+    // Fall back to language-native object rendering — see "Untyped object fallback" below
 ```
+
+**Merge with the example body before rendering.** The algorithm above renders only the fields present in `body`; unspecified fields are omitted entirely. Consumers usually want "static example as base, override these keys" semantics — deep-merge the user's overrides into `example.request.body` before calling `renderCall`. Without the merge, naive consumers will produce calls missing required fields and may mistakenly think the schema is incomplete.
 
 #### `RenderSchema` fields
 
 - `callTemplate` — call wrapper string containing `{{name}}` placeholders for path/query params and a `{{__body__}}` placeholder (omitted when there is no body).
-- `params` — ordered list of path/query params (`{ name, kind }`). Each entry corresponds to a `{{name}}` placeholder in `callTemplate`.
+- `params` — ordered list of path/query params (`{ name, kind, enumValues? }`). Each entry corresponds to a `{{name}}` placeholder in `callTemplate`. `kind` uses the same `SchemaFieldKind` union as body fields, so an enum-typed path param can surface its allowed values via `enumValues` (today Fern emits scalar path args; the wider type future-proofs the schema).
 - `body` — optional `{ fields, fieldSeparator }`. Fields are ordered (required first); each carries a `fieldTemplate` with a `{{value}}` placeholder.
 
-#### `SchemaField` kinds
+#### `SchemaField` (and `ParamField`) kinds
+
+Every entry — body field or path/query param — carries `kind` and `required`. The `required` flag is always present; it tells the consumer whether the field can be safely omitted (Java staged builders enforce this; TS/Python report it for fidelity). Path params are always required (the URL template can't be satisfied without them).
 
 | `kind`    | extra fields            | rendering                                                                 |
 |-----------|-------------------------|---------------------------------------------------------------------------|
@@ -120,16 +124,32 @@ function renderValue(value, field):
 | `boolean` | —                       | Use `renderRules.trueLiteral` / `falseLiteral`                            |
 | `enum`    | `enumValues: string[]`  | Render as `string`; surface `enumValues` to UI for dropdowns              |
 | `list`    | `items: SchemaField`    | Render each element via `items`, join with `listSeparator`, wrap via `listLiteral` |
-| `object`  | `nested?: BodySchema`   | Recurse into `nested` if present; otherwise render as a JSON object literal |
+| `object`  | `nested?: BodySchema`   | Recurse into `nested` if present; see "Untyped object fallback" below     |
 
-#### Language differences encoded in `renderRules`
+#### Untyped object fallback
 
-| Rule              | TypeScript     | Python                    | Java                       |
-|-------------------|----------------|---------------------------|----------------------------|
-| `trueLiteral`     | `true`         | `True`                    | `true`                     |
-| `falseLiteral`    | `false`        | `False`                   | `false`                    |
-| `nullLiteral`     | `null`         | `None`                    | `null`                     |
-| `listLiteral`     | `[{{items}}]`  | `[{{items}}]`             | `Arrays.asList({{items}})` |
+When `kind === "object"` and `nested` is absent, the SDK type couldn't be resolved. Behavior:
+
+- **TS / Python**: render as a language-native JSON object literal — `{ key: value, ... }` for TS, `{"key": value, ...}` for Python. Both languages accept this in places where the type would have specified a typed object.
+- **Java**: undefined. Java's typed builders don't accept JSON-object literals; in practice `nested` is always populated for fields the schema knows about, so this case shouldn't occur on a well-formed manifest. Consumers should treat an unresolved Java `object` field as a schema-extraction gap and either skip the field or fall back to the example's `request.body` value verbatim.
+
+#### `renderRules` reference
+
+Every key in `renderRules` is required so the consumer's `renderValue` algorithm runs without nil checks.
+
+| Key             | TypeScript      | Python           | Java                          |
+|-----------------|-----------------|------------------|-------------------------------|
+| `stringLiteral` | `"{{value}}"`   | `"{{value}}"`    | `"{{value}}"`                 |
+| `numberLiteral` | `{{value}}`     | `{{value}}`      | `{{value}}`                   |
+| `trueLiteral`   | `true`          | `True`           | `true`                        |
+| `falseLiteral`  | `false`         | `False`          | `false`                       |
+| `nullLiteral`   | `null`          | `None`           | `null`                        |
+| `listLiteral`   | `[{{items}}]`   | `[{{items}}]`    | `Arrays.asList({{items}})`    |
+| `listSeparator` | `", "`          | `", "`           | `", "`                        |
+
+`{{value}}` is replaced with the rendered child literal; `{{items}}` is replaced with the list elements pre-joined by `listSeparator`.
+
+**String escaping**: the consumer is responsible for escaping the string's interior before substituting into `stringLiteral`. JSON escaping (`\n`, `\t`, `\"`, `\\`, `\uXXXX`) is a safe lowest common denominator across all three languages — Java string literals accept the same escape sequences as JSON. The `stringLiteral` template supplies the surrounding quotes.
 
 #### Language differences encoded in the per-example schema
 

@@ -113,8 +113,14 @@ export interface RenderSchema {
 export interface ParamField {
     // Matches a {{name}} placeholder in callTemplate.
     name: string;
-    // Path and query params are always scalar.
-    kind: "string" | "number" | "boolean";
+    // Scalar in practice today (Fern emits `string` / `number` / `boolean`
+    // for positional path args). Widened to the full SchemaFieldKind union
+    // so enum-typed path params surface their wire values via `enumValues`
+    // if the SDK type system ever expresses them — gives consumers free
+    // dropdowns without a schema-breaking change later.
+    kind: SchemaFieldKind;
+    // Populated when `kind === "enum"`. Same semantics as SchemaField.enumValues.
+    enumValues?: string[];
 }
 
 export interface BodySchema {
