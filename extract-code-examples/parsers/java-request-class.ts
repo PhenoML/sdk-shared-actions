@@ -113,10 +113,22 @@ function toSchemaField(
         if (resolved?.enumConstants) {
             applyJavaEnum(field, resolved);
         } else if (resolved) {
-            field.nested = wrapJavaBuilder(buildJavaBodySchema(resolved, { visited }), resolved);
+            field.nested = wrapJavaBuilder(
+                buildJavaBodySchema(resolved, { visited: extendPath(visited, resolved.className) }),
+                resolved,
+            );
         }
     }
     return field;
+}
+
+// Path-scoped visited tracking: the returned set is a copy of the caller's
+// path plus the class we're about to descend into. Mutating only the copy
+// prevents two sibling fields of the same type from clobbering each other.
+function extendPath(visited: Set<string>, className: string): Set<string> {
+    const next = new Set(visited);
+    next.add(className);
+    return next;
 }
 
 // Tag a nested BodySchema with the Java builder envelope so consumers
@@ -164,7 +176,10 @@ function listItemField(
         if (resolved?.enumConstants) {
             applyJavaEnum(item, resolved);
         } else if (resolved) {
-            item.nested = wrapJavaBuilder(buildJavaBodySchema(resolved, { visited }), resolved);
+            item.nested = wrapJavaBuilder(
+                buildJavaBodySchema(resolved, { visited: extendPath(visited, resolved.className) }),
+                resolved,
+            );
         }
     }
     return item;
@@ -220,10 +235,14 @@ function unwrapList(rawType: string): string {
     return m ? m[1].trim() : "Object";
 }
 
-// Resolve a type-name reference inside `owner` to a parsed JavaClassInfo on
-// disk, returning null when the type isn't a class we can read (primitives,
-// types from external packages we don't ship, etc). `visited` prevents
-// infinite recursion on self-referential schemas (e.g. a tree node type).
+// Resolve a type-name reference inside `owner` to a parsed JavaClassInfo
+// on disk, returning null when the type isn't a class we can read
+// (primitives, types from external packages we don't ship, etc). `visited`
+// is the CURRENT RECURSION PATH used to prevent infinite cycles in
+// self-referential schemas — we read it but don't mutate it, so two
+// sibling fields referencing the same type can each resolve independently.
+// The recursive call site adds the resolved class name to the path before
+// descending.
 function resolveNestedClass(
     rawType: string,
     owner: JavaClassInfo,
@@ -232,7 +251,6 @@ function resolveNestedClass(
     const simple = rawType.trim().replace(/<.*$/, "").trim();
     if (!simple || JAVA_PRIMITIVE_KIND[simple] !== undefined) return null;
     if (visited.has(simple)) return null;
-    visited.add(simple);
 
     const javaDir = findJavaRoot(owner.filePath);
     if (!javaDir) return null;

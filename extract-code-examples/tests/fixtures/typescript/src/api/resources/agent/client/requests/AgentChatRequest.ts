@@ -18,6 +18,8 @@ export interface AgentChatRequest {
     tools?: string[];
     /** Optional list of tag objects (exercises items.nested). */
     categories?: Tag[];
+    /** Second Tag-typed field — guards against shared-visited-state regressions. */
+    primaryTag?: Tag;
 }
 
 export namespace AgentChatRequest {

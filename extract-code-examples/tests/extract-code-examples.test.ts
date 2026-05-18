@@ -1022,8 +1022,21 @@ describe("TypeScript parser (Summary client fixture)", () => {
         const chat = endpoints.find((e) => e.methodName === "chat")!;
         expect(chat.renderSchema?.callTemplate).toBe("client.agent.chat({ {{__body__}} })");
         const fields = chat.renderSchema?.body?.fields ?? [];
-        expect(fields.map((f) => f.jsonKey)).toEqual(["message", "role", "tools", "categories"]);
+        expect(fields.map((f) => f.jsonKey)).toEqual([
+            "message", "role", "tools", "categories", "primaryTag",
+        ]);
         expect(fields.find((f) => f.jsonKey === "X-Phenoml-On-Behalf-Of")).toBeUndefined();
+    });
+
+    test("renderSchema resolves a second occurrence of the same nested type", () => {
+        // `primaryTag?: Tag` appears AFTER `categories?: Tag[]`. Previously
+        // the visited set was shared across sibling fields, so the second
+        // Tag reference silently failed to resolve (no nested schema).
+        const chat = endpoints.find((e) => e.methodName === "chat")!;
+        const primaryTag = chat.renderSchema?.body?.fields.find((f) => f.jsonKey === "primaryTag");
+        expect(primaryTag?.kind).toBe("object");
+        expect(primaryTag?.nested?.fields.map((f) => f.jsonKey)).toEqual(["name", "color"]);
+        expect(primaryTag?.nested?.wrap).toBe("{ {{__body__}} }");
     });
 
     test("renderSchema recurses into list-of-object items via items.nested", () => {
@@ -1144,6 +1157,7 @@ describe("typescript-schema helpers", () => {
             "role",
             "tools",
             "categories",
+            "primaryTag",
         ]);
         expect(info?.fields.find((f) => f.jsonKey === "message")?.isOptional).toBe(false);
         expect(info?.fields.find((f) => f.jsonKey === "role")?.isOptional).toBe(true);
@@ -1611,7 +1625,7 @@ describe("Java parser (rich schema fixture)", () => {
         const keys = fields.map((f) => f.jsonKey);
         // Required (staged-builder order) before optionals; @JsonIgnore'd
         // header field (phenomlOnBehalfOf) excluded entirely.
-        expect(keys).toEqual(["name", "role", "tools", "categories", "description"]);
+        expect(keys).toEqual(["name", "role", "tools", "categories", "primary_tag", "description"]);
         expect(fields[0]).toMatchObject({ kind: "string", required: true });
         expect(fields[1]).toMatchObject({ kind: "enum", required: true });
         expect(fields[1].enumValues).toEqual(["assistant", "reviewer", "custom"]);
@@ -1634,7 +1648,14 @@ describe("Java parser (rich schema fixture)", () => {
         // the consumer's renderer would emit `Arrays.asList(.name("x")...)`
         // — invalid Java since the bare fluent chain has no receiver.
         expect(fields[3].items?.nested?.wrap).toBe("Tag.builder(){{__body__}}.build()");
-        expect(fields[4]).toMatchObject({ kind: "string", required: false });
+        // The second Tag-typed field (`primary_tag`) must resolve independently
+        // of the first (under `categories`). A previous bug shared a visited
+        // set across siblings, so the second occurrence silently lost its
+        // nested schema.
+        expect(fields[4]).toMatchObject({ jsonKey: "primary_tag", kind: "object", required: false });
+        expect(fields[4].nested?.fields.map((f) => f.jsonKey)).toEqual(["name", "color"]);
+        expect(fields[4].nested?.wrap).toBe("Tag.builder(){{__body__}}.build()");
+        expect(fields[5]).toMatchObject({ kind: "string", required: false });
     });
 
     test("fieldTemplate uses the camelCase setter name and {{value}} placeholder", () => {
@@ -1644,6 +1665,7 @@ describe("Java parser (rich schema fixture)", () => {
             ".role({{value}})",
             ".tools({{value}})",
             ".categories({{value}})",
+            ".primaryTag({{value}})",
             ".description({{value}})",
         ]);
         expect(createAgent.renderSchema?.body?.fieldSeparator).toBe("");

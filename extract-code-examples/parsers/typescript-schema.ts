@@ -195,9 +195,12 @@ function tsBuildNestedBody(
     caches?: TsParseCaches,
     visited?: Set<string>,
 ): BodySchema {
-    const seen = visited ?? new Set<string>();
-    seen.add(info.interfaceName);
-    const fields = info.fields.map((f) => tsToSchemaField(f, info, caches, seen));
+    // Build a path-scoped set that includes the interface we're about to
+    // descend into. Copying instead of mutating the caller's set means two
+    // sibling fields of the same type each get a fresh resolution attempt.
+    const path = new Set(visited);
+    path.add(info.interfaceName);
+    const fields = info.fields.map((f) => tsToSchemaField(f, info, caches, path));
     // Object-literal envelope so the consumer doesn't emit a bare property
     // list when this body is used as an inline value (e.g. inside a list
     // of objects: `[{ name: "x" }, { name: "y" }]`).

@@ -26,6 +26,8 @@ public final class CreateAgentRequest {
 
     private final Optional<List<Tag>> categories;
 
+    private final Optional<Tag> primaryTag;
+
     private final Optional<String> description;
 
     private CreateAgentRequest(
@@ -34,12 +36,14 @@ public final class CreateAgentRequest {
             AgentRole role,
             Optional<List<String>> tools,
             Optional<List<Tag>> categories,
+            Optional<Tag> primaryTag,
             Optional<String> description) {
         this.phenomlOnBehalfOf = phenomlOnBehalfOf;
         this.name = name;
         this.role = role;
         this.tools = tools;
         this.categories = categories;
+        this.primaryTag = primaryTag;
         this.description = description;
     }
 
@@ -68,6 +72,11 @@ public final class CreateAgentRequest {
         return categories;
     }
 
+    @JsonProperty("primary_tag")
+    public Optional<Tag> getPrimaryTag() {
+        return primaryTag;
+    }
+
     @JsonProperty("description")
     public Optional<String> getDescription() {
         return description;
@@ -91,6 +100,8 @@ public final class CreateAgentRequest {
         _FinalStage tools(List<String> tools);
         _FinalStage categories(Optional<List<Tag>> categories);
         _FinalStage categories(List<Tag> categories);
+        _FinalStage primaryTag(Optional<Tag> primaryTag);
+        _FinalStage primaryTag(Tag primaryTag);
         _FinalStage description(Optional<String> description);
         _FinalStage description(String description);
         _FinalStage phenomlOnBehalfOf(Optional<String> phenomlOnBehalfOf);
@@ -102,6 +113,7 @@ public final class CreateAgentRequest {
         private AgentRole role;
         private Optional<List<String>> tools = Optional.empty();
         private Optional<List<Tag>> categories = Optional.empty();
+        private Optional<Tag> primaryTag = Optional.empty();
         private Optional<String> description = Optional.empty();
         private Optional<String> phenomlOnBehalfOf = Optional.empty();
 
@@ -113,13 +125,15 @@ public final class CreateAgentRequest {
         public _FinalStage tools(Optional<List<String>> tools) { this.tools = tools; return this; }
         public _FinalStage categories(List<Tag> categories) { this.categories = Optional.ofNullable(categories); return this; }
         public _FinalStage categories(Optional<List<Tag>> categories) { this.categories = categories; return this; }
+        public _FinalStage primaryTag(Tag primaryTag) { this.primaryTag = Optional.ofNullable(primaryTag); return this; }
+        public _FinalStage primaryTag(Optional<Tag> primaryTag) { this.primaryTag = primaryTag; return this; }
         public _FinalStage description(String description) { this.description = Optional.ofNullable(description); return this; }
         public _FinalStage description(Optional<String> description) { this.description = description; return this; }
         public _FinalStage phenomlOnBehalfOf(String value) { this.phenomlOnBehalfOf = Optional.ofNullable(value); return this; }
         public _FinalStage phenomlOnBehalfOf(Optional<String> value) { this.phenomlOnBehalfOf = value; return this; }
 
         public CreateAgentRequest build() {
-            return new CreateAgentRequest(phenomlOnBehalfOf, name, role, tools, categories, description);
+            return new CreateAgentRequest(phenomlOnBehalfOf, name, role, tools, categories, primaryTag, description);
         }
     }
 }
