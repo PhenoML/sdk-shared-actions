@@ -76,4 +76,49 @@ export class AgentClient {
 
         return handleNonStatusCodeError(_response.error, _response.rawResponse, "POST", "/agent/stream-chat");
     }
+
+    public chat(
+        request: phenoml.agent.AgentChatRequest,
+        requestOptions?: AgentClient.RequestOptions,
+    ): core.HttpResponsePromise<unknown> {
+        return core.HttpResponsePromise.fromPromise(this.__chat(request, requestOptions));
+    }
+
+    public getAgent(
+        agentId: string,
+        request: phenoml.agent.GetAgentRequest = {},
+        requestOptions?: AgentClient.RequestOptions,
+    ): core.HttpResponsePromise<unknown> {
+        return core.HttpResponsePromise.fromPromise(this.__getAgent(agentId, request, requestOptions));
+    }
+
+    private async __getAgent(
+        agentId: string,
+        request: phenoml.agent.GetAgentRequest = {},
+        requestOptions?: AgentClient.RequestOptions,
+    ): Promise<core.WithRawResponse<unknown>> {
+        const { version } = request;
+        const _queryParams: Record<string, unknown> = { version };
+        const _response = await (this._options.fetcher ?? core.fetcher)({
+            url: `https://example/agent/${agentId}`,
+            method: "GET",
+            queryParameters: _queryParams,
+        });
+        if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
+        return handleNonStatusCodeError(_response.error, _response.rawResponse, "GET", "/agent/{agent_id}");
+    }
+
+    private async __chat(
+        request: phenoml.agent.AgentChatRequest,
+        requestOptions?: AgentClient.RequestOptions,
+    ): Promise<core.WithRawResponse<unknown>> {
+        const { "X-Phenoml-On-Behalf-Of": phenomlOnBehalfOf, ..._body } = request;
+        const _response = await (this._options.fetcher ?? core.fetcher)({
+            url: "https://example/agent/chat",
+            method: "POST",
+            body: _body,
+        });
+        if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
+        return handleNonStatusCodeError(_response.error, _response.rawResponse, "POST", "/agent/chat");
+    }
 }

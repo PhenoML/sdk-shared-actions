@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { EndpointMapping, LanguageParser, TestExample } from "../types";
+import { buildPythonRenderSchema } from "./python-schema";
 import {
     findFiles,
     isBalancedParens,
@@ -32,8 +33,12 @@ export function createPythonParser(): LanguageParser {
             const pkgRoot = path.join(srcDir, pkgDir);
             const clientFiles = findFiles(pkgRoot, /raw_client\.py$/);
             const endpoints: EndpointMapping[] = [];
+            const linesCache = new Map<string, string[]>();
             for (const file of clientFiles) {
                 const fileEndpoints = pyExtractEndpoints(file, pkgRoot);
+                for (const ep of fileEndpoints) {
+                    ep.renderSchema = buildPythonRenderSchema(ep, pkgRoot, linesCache);
+                }
                 endpoints.push(...fileEndpoints);
                 console.error(`  ${path.relative(rootDir, file)}: ${fileEndpoints.length} endpoints`);
             }
@@ -449,7 +454,6 @@ export function pyExtractTestExamples(
                 requestBody: null,
                 responseBody,
                 sdkCallArgs: sdkCallSource ? pyParseKwargs(sdkCallSource) : [],
-                sdkCallSource,
             });
         }
     }

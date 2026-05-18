@@ -4,9 +4,45 @@ import type {
     FernMetadata,
     Language,
     Manifest,
+    RenderRules,
     TestExample,
 } from "./types";
 import { pathMatchesTemplate } from "./utils";
+
+// Per-language constants consumed by the (language-agnostic) renderer that
+// runs in downstream tools. Adding a new SDK language means adding an entry
+// here plus a parser that emits RenderSchema on each example.
+const RENDER_RULES_BY_LANGUAGE: Record<Language, RenderRules> = {
+    typescript: {
+        stringLiteral: `"{{value}}"`,
+        numberLiteral: `{{value}}`,
+        trueLiteral: "true",
+        falseLiteral: "false",
+        nullLiteral: "null",
+        listLiteral: `[{{items}}]`,
+        listSeparator: ", ",
+    },
+    python: {
+        stringLiteral: `"{{value}}"`,
+        numberLiteral: `{{value}}`,
+        trueLiteral: "True",
+        falseLiteral: "False",
+        nullLiteral: "None",
+        listLiteral: `[{{items}}]`,
+        listSeparator: ", ",
+    },
+    java: {
+        stringLiteral: `"{{value}}"`,
+        numberLiteral: `{{value}}`,
+        trueLiteral: "true",
+        falseLiteral: "false",
+        nullLiteral: "null",
+        // Fern's Java codegen emits `Arrays.asList(...)` for list literals,
+        // so the consumer matches that convention rather than `List.of(...)`.
+        listLiteral: `Arrays.asList({{items}})`,
+        listSeparator: ", ",
+    },
+};
 
 export function findTemplateMatch(
     httpMethod: string,
@@ -66,15 +102,14 @@ export function deriveBodyFromKwargs(
     return count > 0 ? body : null;
 }
 
-// Counts how many of {body, sdkCallArgs, responseBody, sdkCallSource}
-// carry data. Used to decide which of two examples for the same endpoint
-// should land in the manifest — higher score wins, ties keep the first.
+// Counts how many of {body, responseBody} carry data. Used to decide
+// which of two examples for the same endpoint should land in the manifest
+// — higher score wins, ties keep the first. The Python authtoken fixture
+// relies on this to pick the kwarg-bearing test over the body-less one.
 function codeExampleRichness(ex: CodeExample): number {
     let score = 0;
     if (ex.request.body !== null) score++;
-    if (ex.request.sdkCallArgs.length > 0) score++;
     if (ex.response.body !== null) score++;
-    if (ex.sdkCallSource) score++;
     return score;
 }
 
@@ -129,6 +164,7 @@ export function buildManifest(
             specCommit: metadata.originGitCommit || "unknown",
             generatorName: metadata.generatorName,
         },
+        renderRules: RENDER_RULES_BY_LANGUAGE[language],
         examples: {},
     };
 
@@ -156,12 +192,10 @@ export function buildManifest(
             const candidate: CodeExample = {
                 httpMethod: endpoint.httpMethod,
                 httpPath: endpoint.httpPath,
-                sdkMethodChain: endpoint.methodChain,
-                sdkMethodName: endpoint.methodName,
-                request: { body, sdkCallArgs: example.sdkCallArgs },
+                request: { body },
                 response,
-                sdkCallSource: example.sdkCallSource,
             };
+            if (endpoint.renderSchema) candidate.render = endpoint.renderSchema;
             // Multiple wire tests can target the same endpoint (success +
             // variants, or — like the python fixture — a test that omits
             // kwargs to exercise an unrelated parser path). Prefer the
