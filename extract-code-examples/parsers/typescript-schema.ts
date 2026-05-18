@@ -198,7 +198,10 @@ function tsBuildNestedBody(
     const seen = visited ?? new Set<string>();
     seen.add(info.interfaceName);
     const fields = info.fields.map((f) => tsToSchemaField(f, info, caches, seen));
-    return { fieldSeparator: ", ", fields };
+    // Object-literal envelope so the consumer doesn't emit a bare property
+    // list when this body is used as an inline value (e.g. inside a list
+    // of objects: `[{ name: "x" }, { name: "y" }]`).
+    return { fieldSeparator: ", ", fields, wrap: "{ {{__body__}} }" };
 }
 
 // Resolve a type-name reference inside an interface to a parsed

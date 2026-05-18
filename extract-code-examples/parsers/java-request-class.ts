@@ -113,10 +113,20 @@ function toSchemaField(
         if (resolved?.enumConstants) {
             applyJavaEnum(field, resolved);
         } else if (resolved) {
-            field.nested = buildJavaBodySchema(resolved, { visited });
+            field.nested = wrapJavaBuilder(buildJavaBodySchema(resolved, { visited }), resolved);
         }
     }
     return field;
+}
+
+// Tag a nested BodySchema with the Java builder envelope so consumers
+// know to emit `<Class>.builder(){{__body__}}.build()` around the
+// rendered fluent-setter chain. Without this, a parent field like
+// `.mainTag({{value}})` would receive `.name("x").color("red")` and
+// produce invalid Java.
+function wrapJavaBuilder(schema: BodySchema, owner: JavaClassInfo): BodySchema {
+    schema.wrap = `${owner.className}.builder(){{__body__}}.build()`;
+    return schema;
 }
 
 // Promote a field that resolved to a Java enum class. Carries both the
@@ -154,7 +164,7 @@ function listItemField(
         if (resolved?.enumConstants) {
             applyJavaEnum(item, resolved);
         } else if (resolved) {
-            item.nested = buildJavaBodySchema(resolved, { visited });
+            item.nested = wrapJavaBuilder(buildJavaBodySchema(resolved, { visited }), resolved);
         }
     }
     return item;

@@ -102,11 +102,16 @@ function renderValue(value, field):
     return renderRules.listLiteral.replace("{{items}}", items)
   if isObject(value):
     if field.nested:
-      // Recurse: same algorithm with nested schema as the body
-      return field.nested.fields
+      inner = field.nested.fields
         .filter(nf => nf.jsonKey in value)
         .map(nf => nf.fieldTemplate.replace("{{value}}", renderValue(value[nf.jsonKey], nf)))
         .join(field.nested.fieldSeparator)
+      // Apply the language-specific envelope (Java: `Tag.builder(){{__body__}}.build()`;
+      // TS: `{ {{__body__}} }`). The top-level `body` has no `wrap` —
+      // its envelope is already in `callTemplate`.
+      if field.nested.wrap:
+        return field.nested.wrap.replace("{{__body__}}", inner)
+      return inner
     // Fall back to language-native object rendering — see "Untyped object fallback" below
 ```
 
@@ -116,7 +121,7 @@ function renderValue(value, field):
 
 - `callTemplate` — call wrapper string containing `{{name}}` placeholders for path/query params and a `{{__body__}}` placeholder (omitted when there is no body).
 - `params` — ordered list of path/query params (`{ name, kind, enumValues? }`). Each entry corresponds to a `{{name}}` placeholder in `callTemplate`. `kind` uses the same `SchemaFieldKind` union as body fields, so an enum-typed path param can surface its allowed values via `enumValues` (today Fern emits scalar path args; the wider type future-proofs the schema).
-- `body` — optional `{ fields, fieldSeparator }`. Fields are ordered (required first); each carries a `fieldTemplate` with a `{{value}}` placeholder.
+- `body` — optional `{ fields, fieldSeparator, wrap? }`. Fields are ordered (required first); each carries a `fieldTemplate` with a `{{value}}` placeholder. The top-level body has no `wrap` (its envelope is in `callTemplate`); nested bodies (under a field's `nested` slot) carry `wrap` containing a `{{__body__}}` placeholder — Java emits `Tag.builder(){{__body__}}.build()`, TS emits `{ {{__body__}} }`.
 
 #### `SchemaField` (and `ParamField`) kinds
 

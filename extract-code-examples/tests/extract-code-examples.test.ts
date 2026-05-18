@@ -1036,6 +1036,11 @@ describe("TypeScript parser (Summary client fixture)", () => {
         expect(categories?.items?.kind).toBe("object");
         const nestedKeys = categories?.items?.nested?.fields.map((f) => f.jsonKey) ?? [];
         expect(nestedKeys).toEqual(["name", "color"]);
+        // The nested schema must carry the TS object-literal envelope.
+        // Without it, the consumer's renderer would join the property
+        // chain bare and emit `[name: "x", color: "red"]` instead of
+        // `[{ name: "x", color: "red" }]`.
+        expect(categories?.items?.nested?.wrap).toBe("{ {{__body__}} }");
     });
 
     test("renderSchema exposes namespace-const enums via enumValues", () => {
@@ -1625,6 +1630,10 @@ describe("Java parser (rich schema fixture)", () => {
         expect(fields[3].items?.kind).toBe("object");
         const tagKeys = fields[3].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
         expect(tagKeys).toEqual(["name", "color"]);
+        // The nested Tag schema must carry the Java builder envelope, or
+        // the consumer's renderer would emit `Arrays.asList(.name("x")...)`
+        // — invalid Java since the bare fluent chain has no receiver.
+        expect(fields[3].items?.nested?.wrap).toBe("Tag.builder(){{__body__}}.build()");
         expect(fields[4]).toMatchObject({ kind: "string", required: false });
     });
 

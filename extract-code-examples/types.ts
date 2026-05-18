@@ -134,6 +134,18 @@ export interface BodySchema {
     // Joiner inserted between rendered fields when assembling the body.
     // "" for Java (each field starts with "."), ", " for TS/Python.
     fieldSeparator: string;
+    // Language-specific envelope to wrap the joined fields with when this
+    // schema is rendered as an inline value (i.e. nested inside a parent
+    // field). Contains a `{{__body__}}` placeholder for the joined body.
+    // Examples:
+    //   Java: "Tag.builder(){{__body__}}.build()"
+    //   TS:   "{ {{__body__}} }"
+    // Absent on the top-level body — that case is wrapped by the
+    // RenderSchema's `callTemplate` instead. Without `wrap`, a nested Java
+    // Tag would render as `.name("x").color("red")` and the parent list
+    // would emit `Arrays.asList(.name("x").color("red"))`, which is
+    // invalid Java.
+    wrap?: string;
 }
 
 export interface SchemaField {
