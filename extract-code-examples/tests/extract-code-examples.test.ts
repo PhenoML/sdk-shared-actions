@@ -1120,7 +1120,12 @@ describe("TypeScript parser (Summary client fixture)", () => {
 });
 
 describe("typescript-schema helpers", () => {
-    const enums = new Map<string, string[]>([["Role", ["assistant", "reviewer"]]]);
+    const enums = new Map([
+        ["Role", [
+            { key: "Assistant", wireValue: "assistant" },
+            { key: "Reviewer", wireValue: "reviewer" },
+        ]],
+    ]);
 
     test("tsInferKind classifies the shapes Fern emits", () => {
         expect(tsInferKind("string", enums)).toBe("string");
