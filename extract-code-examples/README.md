@@ -67,6 +67,19 @@ example are all derivable from `render` and have been removed; recompose
 them by running `renderCall(example, example.request.body, {})` if a
 human-readable form is needed.
 
+### Streaming endpoints
+
+`response.streaming === true` marks SSE / streaming endpoints (Fern's
+`Iterable<...>` return on Java, `httpx_client.stream(...)` on Python,
+`core.Stream<...>` on TS). When set, `response.body` is **always
+`null`** — the manifest does NOT carry an example event chunk,
+accumulated result, or union of chunk shapes. Wire tests for these
+endpoints enqueue a placeholder body Fern emits that the SDK's streaming
+path never parses, so surfacing it would be misleading. Consumers
+rendering a streaming example UI should treat `streaming: true` as the
+signal to switch presentation (e.g. show an "event stream" badge) and
+fall back to a generic streaming-response illustration if they want one.
+
 ### Dynamic rendering
 
 `renderRules` (per language) plus the per-example `render` field let a

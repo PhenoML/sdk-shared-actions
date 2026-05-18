@@ -75,6 +75,12 @@ export interface CodeExample {
         body: unknown | null;
     };
     response: {
+        // For non-streaming endpoints: the wire response JSON the test
+        // asserts. For streaming endpoints (`streaming === true`): always
+        // null — the wire-test mock body is a placeholder Fern emits that
+        // the SDK's streaming path never parses as a real event. The
+        // manifest deliberately doesn't surface a first-chunk or
+        // accumulated-result example today.
         body: unknown | null;
         // Set on SSE endpoints so docs can render an "event stream" badge
         // instead of treating the (null) body as a missing-example signal.
