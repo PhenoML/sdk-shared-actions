@@ -4,7 +4,9 @@ Composite action. Fetches the combined OpenAPI spec for an SDK's source
 commit (Fern's `originGitCommit`) from the public `phenoml-openapi-specs`
 GCS bucket and commits it back to the current branch if it changed.
 Retries up to ~5 minutes to absorb the race between Fern opening the SDK
-PR and the upstream spec-publish workflow finishing.
+PR and the upstream spec-publish workflow finishing. The git push also
+retries on non-fast-forward so it co-exists with other workflows (e.g.
+`extract-code-examples`) pushing to the same branch concurrently.
 
 ## Usage
 

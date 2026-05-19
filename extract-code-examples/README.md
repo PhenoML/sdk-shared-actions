@@ -30,17 +30,13 @@ jobs:
           ref: ${{ github.head_ref }}
 
       - uses: PhenoML/sdk-shared-actions/extract-code-examples@v1
-
-      - name: Commit code-examples.json if changed
-        run: |
-          git add code-examples.json
-          if ! git diff --cached --quiet -- code-examples.json; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore: update code-examples.json"
-            git push
-          fi
 ```
+
+The action commits `code-examples.json` and pushes it back to the PR
+branch when the manifest changes (retrying on non-fast-forward so it
+co-exists with other workflows — e.g. `bundle-openapi-spec` — pushing
+to the same branch concurrently). The caller must check out the PR
+branch with `contents: write` permission.
 
 ## Manifest schema
 

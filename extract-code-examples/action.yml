@@ -27,3 +27,42 @@ runs:
         ROOT: ${{ inputs.root }}
         ACTION_PATH: ${{ github.action_path }}
       run: bun run "$ACTION_PATH/index.ts" --root "$ROOT"
+
+    - name: Commit code-examples.json if changed
+      shell: bash
+      working-directory: ${{ inputs.root }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add code-examples.json
+        if git diff --cached --quiet -- code-examples.json; then
+          echo "code-examples.json unchanged; nothing to commit."
+          exit 0
+        fi
+        git commit -m "chore: update code-examples.json"
+
+        # bundle-openapi-spec can push to the same branch concurrently on
+        # Fern PRs. Retry on non-fast-forward by rebasing onto the new
+        # remote tip — the two actions touch different files so rebase
+        # should always be clean.
+        attempt=1
+        max_attempts=5
+        while :; do
+          push_output=$(git push 2>&1) && rc=0 || rc=$?
+          printf '%s\n' "$push_output"
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "::error::push failed after $max_attempts attempts"
+            exit 1
+          fi
+          if ! grep -qE '(rejected|non-fast-forward|fetch first)' <<< "$push_output"; then
+            echo "::error::push failed for a non-race reason"
+            exit 1
+          fi
+          echo "Push rejected (likely concurrent push); rebasing and retrying (attempt $attempt/$max_attempts)..."
+          git pull --rebase --autostash
+          attempt=$((attempt + 1))
+          sleep 2
+        done
