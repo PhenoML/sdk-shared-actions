@@ -34,9 +34,9 @@ jobs:
 
 The action commits `code-examples.json` and pushes it back to the PR
 branch when the manifest changes (retrying on non-fast-forward so it
-co-exists with other workflows — e.g. `bundle-openapi-spec` — pushing
-to the same branch concurrently). The caller must check out the PR
-branch with `contents: write` permission.
+co-exists with anything else — another workflow, a human — pushing to
+the same branch concurrently). The caller must check out the PR branch
+with `contents: write` permission.
 
 ## Manifest schema
 

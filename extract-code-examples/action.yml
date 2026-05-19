@@ -41,10 +41,11 @@ runs:
         fi
         git commit -m "chore: update code-examples.json"
 
-        # bundle-openapi-spec can push to the same branch concurrently on
-        # Fern PRs. Retry on non-fast-forward by rebasing onto the new
-        # remote tip — the two actions touch different files so rebase
-        # should always be clean.
+        # Another workflow (or a human) can push to the same branch
+        # concurrently. Retry on non-fast-forward by rebasing onto the
+        # new remote tip; if the concurrent push didn't touch
+        # code-examples.json the rebase replays cleanly, otherwise it
+        # fails and we exit non-zero.
         attempt=1
         max_attempts=5
         while :; do
