@@ -45,6 +45,7 @@ runs:
       env:
         METADATA_PATH: ${{ inputs.metadata-path }}
         OUTPUT_PATH: ${{ inputs.output-path }}
+        PUSH_WITH_RETRY: ${{ github.action_path }}/../_scripts/push-with-retry.sh
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -57,30 +58,4 @@ runs:
         fi
         commit_sha=$(jq -r .originGitCommit "$METADATA_PATH")
         git commit -m "chore: bundle OpenAPI spec for ${commit_sha}"
-
-        # Another workflow (or a human) can push to the same branch
-        # concurrently. Retry on non-fast-forward by rebasing onto the
-        # new remote tip; if the concurrent push didn't touch the spec
-        # file the rebase replays cleanly, otherwise it fails and we
-        # exit non-zero.
-        attempt=1
-        max_attempts=5
-        while :; do
-          push_output=$(git push 2>&1) && rc=0 || rc=$?
-          printf '%s\n' "$push_output"
-          if [ "$rc" -eq 0 ]; then
-            exit 0
-          fi
-          if [ "$attempt" -ge "$max_attempts" ]; then
-            echo "::error::push failed after $max_attempts attempts"
-            exit 1
-          fi
-          if ! grep -qE '(rejected|non-fast-forward|fetch first)' <<< "$push_output"; then
-            echo "::error::push failed for a non-race reason"
-            exit 1
-          fi
-          echo "Push rejected (likely concurrent push); rebasing and retrying (attempt $attempt/$max_attempts)..."
-          git pull --rebase --autostash
-          attempt=$((attempt + 1))
-          sleep 2
-        done
+        bash "$PUSH_WITH_RETRY"
