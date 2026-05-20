@@ -466,17 +466,21 @@ export function tsParseRequestInterface(filePath: string): TsInterfaceInfo | nul
     return { interfaceName, filePath, fields, enums };
 }
 
-// Matches `type Foo = A | B | C` (at least one branch is a TypeReference).
-// Excludes primitive nullability (`string | undefined`), literal unions
-// (`"a" | "b"`), and indexed-access aliases — none of those carry
-// TypeReference branches.
+// Matches `type Foo = A | B | C` (at least one branch is a TypeReference)
+// when the file has NO top-level `export interface`. Fern's discriminated
+// unions keep their variant interfaces inside the same-named namespace,
+// not at the top level; a sibling helper union (e.g. `Model | undefined`)
+// next to a primary interface would otherwise be misread as a discriminated
+// union and the interface schema lost.
 function tsIsDiscriminatedUnionFile(sf: ts.SourceFile): boolean {
+    let hasUnionAlias = false;
     for (const stmt of sf.statements) {
+        if (ts.isInterfaceDeclaration(stmt)) return false;
         if (!ts.isTypeAliasDeclaration(stmt)) continue;
         if (!ts.isUnionTypeNode(stmt.type)) continue;
-        if (stmt.type.types.some((t) => ts.isTypeReferenceNode(t))) return true;
+        if (stmt.type.types.some((t) => ts.isTypeReferenceNode(t))) hasUnionAlias = true;
     }
-    return false;
+    return hasUnionAlias;
 }
 
 // Recognize `{ Foo: "foo", Bar: "bar" } as const` and return the entries

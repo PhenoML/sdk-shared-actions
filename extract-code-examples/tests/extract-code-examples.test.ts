@@ -1190,6 +1190,19 @@ describe("typescript-schema helpers", () => {
         );
         expect(tsParseRequestInterface(filePath)).toBeNull();
     });
+
+    test("tsParseRequestInterface parses a file with both a top-level interface AND a helper union", () => {
+        // MixedAlias.ts has `export interface MixedAlias` + the helper alias
+        // `type MixedAliasOrEmpty = MixedAlias | undefined`. The bail
+        // heuristic must NOT trigger on this shape — the interface is the
+        // primary export and the union is a sibling.
+        const filePath = path.join(
+            FIXTURES, "typescript", "src", "api", "resources", "agent", "types", "MixedAlias.ts",
+        );
+        const info = tsParseRequestInterface(filePath);
+        expect(info?.interfaceName).toBe("MixedAlias");
+        expect(info?.fields.map((f) => f.jsonKey)).toEqual(["label", "tag"]);
+    });
 });
 
 describe("Python parser (Authtoken auth fixture)", () => {
