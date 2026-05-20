@@ -4,8 +4,10 @@
 //   - a list of scalars (`tools: string[]`)
 //   - a list of objects (`categories: Tag[]`) for nested-recursion coverage
 //   - a hyphenated header-style key
+//   - a discriminated-union field (`auth?: AuthBundle`)
 
 import { Tag } from "../../types/Tag";
+import { AuthBundle } from "../../types/AuthBundle";
 
 export interface AgentChatRequest {
     /** Optional header — destructured out of `request` by the private __method. */
@@ -20,6 +22,8 @@ export interface AgentChatRequest {
     categories?: Tag[];
     /** Second Tag-typed field — guards against shared-visited-state regressions. */
     primaryTag?: Tag;
+    /** Discriminated-union field; the parser must not expand `nested`. */
+    auth?: AuthBundle;
 }
 
 export namespace AgentChatRequest {

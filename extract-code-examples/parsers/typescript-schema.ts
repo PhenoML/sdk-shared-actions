@@ -421,6 +421,14 @@ export function tsParseRequestInterface(filePath: string): TsInterfaceInfo | nul
     const source = fs.readFileSync(filePath, "utf-8");
     const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
 
+    // Discriminated-union files declare `type Foo = A | B | ...` plus a
+    // same-named namespace whose variants share a string-literal discriminator
+    // and pull the rest of their fields from `extends`. Flattening all
+    // variants would emit N copies of the shared discriminator and drop every
+    // inherited field. Bail; the caller leaves `nested` unset on the field so
+    // the consumer renders the example body verbatim.
+    if (tsIsDiscriminatedUnionFile(sf)) return null;
+
     let interfaceName: string | null = null;
     const fields: TsFieldInfo[] = [];
     const enums = new Map<string, TsEnumEntry[]>();
@@ -456,6 +464,19 @@ export function tsParseRequestInterface(filePath: string): TsInterfaceInfo | nul
     visit(sf);
     if (!interfaceName) return null;
     return { interfaceName, filePath, fields, enums };
+}
+
+// Matches `type Foo = A | B | C` (at least one branch is a TypeReference).
+// Excludes primitive nullability (`string | undefined`), literal unions
+// (`"a" | "b"`), and indexed-access aliases — none of those carry
+// TypeReference branches.
+function tsIsDiscriminatedUnionFile(sf: ts.SourceFile): boolean {
+    for (const stmt of sf.statements) {
+        if (!ts.isTypeAliasDeclaration(stmt)) continue;
+        if (!ts.isUnionTypeNode(stmt.type)) continue;
+        if (stmt.type.types.some((t) => ts.isTypeReferenceNode(t))) return true;
+    }
+    return false;
 }
 
 // Recognize `{ Foo: "foo", Bar: "bar" } as const` and return the entries

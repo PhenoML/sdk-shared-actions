@@ -1023,9 +1023,19 @@ describe("TypeScript parser (Summary client fixture)", () => {
         expect(chat.renderSchema?.callTemplate).toBe("client.agent.chat({ {{__body__}} })");
         const fields = chat.renderSchema?.body?.fields ?? [];
         expect(fields.map((f) => f.jsonKey)).toEqual([
-            "message", "role", "tools", "categories", "primaryTag",
+            "message", "role", "tools", "categories", "primaryTag", "auth",
         ]);
         expect(fields.find((f) => f.jsonKey === "X-Phenoml-On-Behalf-Of")).toBeUndefined();
+    });
+
+    test("renderSchema does not expand a discriminated-union field's nested body", () => {
+        // `auth?: AuthBundle` resolves to a `type AuthBundle = A | B | C`.
+        // Without the bail, the parser would flatten variants and emit
+        // duplicate `auth_method` fields — see tsIsDiscriminatedUnionFile.
+        const chat = endpoints.find((e) => e.methodName === "chat")!;
+        const auth = chat.renderSchema?.body?.fields.find((f) => f.jsonKey === "auth");
+        expect(auth?.kind).toBe("object");
+        expect(auth?.nested).toBeUndefined();
     });
 
     test("renderSchema resolves a second occurrence of the same nested type", () => {
@@ -1163,6 +1173,7 @@ describe("typescript-schema helpers", () => {
             "tools",
             "categories",
             "primaryTag",
+            "auth",
         ]);
         expect(info?.fields.find((f) => f.jsonKey === "message")?.isOptional).toBe(false);
         expect(info?.fields.find((f) => f.jsonKey === "role")?.isOptional).toBe(true);
@@ -1170,6 +1181,14 @@ describe("typescript-schema helpers", () => {
             { key: "Assistant", wireValue: "assistant" },
             { key: "Reviewer", wireValue: "reviewer" },
         ]);
+    });
+
+    test("tsParseRequestInterface returns null for a discriminated-union file", () => {
+        // AuthBundle.ts is the discriminated-union fixture — see tsIsDiscriminatedUnionFile.
+        const filePath = path.join(
+            FIXTURES, "typescript", "src", "api", "resources", "agent", "types", "AuthBundle.ts",
+        );
+        expect(tsParseRequestInterface(filePath)).toBeNull();
     });
 });
 
