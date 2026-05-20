@@ -27,3 +27,19 @@ runs:
         ROOT: ${{ inputs.root }}
         ACTION_PATH: ${{ github.action_path }}
       run: bun run "$ACTION_PATH/index.ts" --root "$ROOT"
+
+    - name: Commit code-examples.json if changed
+      shell: bash
+      working-directory: ${{ inputs.root }}
+      env:
+        PUSH_WITH_RETRY: ${{ github.action_path }}/../_scripts/push-with-retry.sh
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add code-examples.json
+        if git diff --cached --quiet -- code-examples.json; then
+          echo "code-examples.json unchanged; nothing to commit."
+          exit 0
+        fi
+        git commit -m "chore: update code-examples.json"
+        bash "$PUSH_WITH_RETRY"
