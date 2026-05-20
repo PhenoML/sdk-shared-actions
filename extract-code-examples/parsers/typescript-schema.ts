@@ -421,6 +421,14 @@ export function tsParseRequestInterface(filePath: string): TsInterfaceInfo | nul
     const source = fs.readFileSync(filePath, "utf-8");
     const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
 
+    // Discriminated-union files declare `type Foo = A | B | ...` plus a
+    // same-named namespace whose variants share a string-literal discriminator
+    // and pull the rest of their fields from `extends`. Flattening all
+    // variants would emit N copies of the shared discriminator and drop every
+    // inherited field. Bail; the caller leaves `nested` unset on the field so
+    // the consumer renders the example body verbatim.
+    if (tsIsDiscriminatedUnionFile(sf)) return null;
+
     let interfaceName: string | null = null;
     const fields: TsFieldInfo[] = [];
     const enums = new Map<string, TsEnumEntry[]>();
@@ -456,6 +464,23 @@ export function tsParseRequestInterface(filePath: string): TsInterfaceInfo | nul
     visit(sf);
     if (!interfaceName) return null;
     return { interfaceName, filePath, fields, enums };
+}
+
+// Matches `type Foo = A | B | C` (at least one branch is a TypeReference)
+// when the file has NO top-level `export interface`. Fern's discriminated
+// unions keep their variant interfaces inside the same-named namespace,
+// not at the top level; a sibling helper union (e.g. `Model | undefined`)
+// next to a primary interface would otherwise be misread as a discriminated
+// union and the interface schema lost.
+function tsIsDiscriminatedUnionFile(sf: ts.SourceFile): boolean {
+    let hasUnionAlias = false;
+    for (const stmt of sf.statements) {
+        if (ts.isInterfaceDeclaration(stmt)) return false;
+        if (!ts.isTypeAliasDeclaration(stmt)) continue;
+        if (!ts.isUnionTypeNode(stmt.type)) continue;
+        if (stmt.type.types.some((t) => ts.isTypeReferenceNode(t))) hasUnionAlias = true;
+    }
+    return hasUnionAlias;
 }
 
 // Recognize `{ Foo: "foo", Bar: "bar" } as const` and return the entries
