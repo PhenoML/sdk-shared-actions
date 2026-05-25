@@ -71,32 +71,41 @@ export function buildTsRenderSchema(
         name: camelToSnake(p.name),
         kind: p.kind,
     }));
-    const hasBody = !!sigInfo?.requestTypeName;
+    // The trailing param is the body when EITHER its type name resolves
+    // (the common case) OR the private method forwards it verbatim — the
+    // latter catches anonymous types like inline `JsonPatchOperation[]`
+    // arrays where `requestTypeName` can't be extracted but the param
+    // still IS the body.
+    const hasBody = !!sigInfo && (!!sigInfo.requestTypeName || sigInfo.wholeParamIsBody);
 
-    if (!sigInfo?.requestTypeName) {
-        return { callTemplate: tsCallTemplate(endpoint, params, hasBody, false), params };
+    if (!sigInfo || !hasBody) {
+        return { callTemplate: tsCallTemplate(endpoint, params, false, false), params };
     }
 
-    const typeFile = tsResolveRequestTypePath(clientFile, sigInfo.requestTypeName);
+    const typeFile = sigInfo.requestTypeName
+        ? tsResolveRequestTypePath(clientFile, sigInfo.requestTypeName)
+        : null;
     const info = typeFile ? tsParseRequestInterfaceCached(typeFile, caches) : null;
 
     // No interface available — either the file lives under types/ and is a
-    // type alias (e.g. `type JsonPatch = JsonPatchOperation[]`), or the
-    // request is a discriminated union we bailed on. When the param's full
-    // value IS the wire body, synthesize a single passthrough field so the
-    // consumer renders the example body verbatim instead of dropping it.
-    // The call template skips `{ }` wrapping in this branch — the rendered
-    // body literal (`[...]` or `{...}`) supplies its own delimiters.
+    // type alias (e.g. `type JsonPatch = JsonPatchOperation[]`), the
+    // request is a discriminated union we bailed on, or the param's type
+    // is anonymous (inline array / object literal — no file to resolve).
+    // When the param's full value IS the wire body, synthesize a single
+    // passthrough field so the consumer renders the example body verbatim
+    // instead of dropping it. The call template skips `{ }` wrapping in
+    // this branch — the rendered body literal (`[...]` or `{...}`)
+    // supplies its own delimiters.
     if (!info) {
         if (!sigInfo.wholeParamIsBody) {
-            return { callTemplate: tsCallTemplate(endpoint, params, hasBody, false), params };
+            return { callTemplate: tsCallTemplate(endpoint, params, true, false), params };
         }
-        const callTemplate = tsCallTemplate(endpoint, params, hasBody, true);
-        const synthetic = tsSyntheticPassthroughField(typeFile, caches);
+        const callTemplate = tsCallTemplate(endpoint, params, true, true);
+        const synthetic = tsSyntheticPassthroughField(typeFile, sigInfo.requestTypeText, clientFile, caches);
         return { callTemplate, params, body: { fieldSeparator: "", fields: [synthetic] } };
     }
 
-    const callTemplate = tsCallTemplate(endpoint, params, hasBody, false);
+    const callTemplate = tsCallTemplate(endpoint, params, true, false);
     const fallback: RenderSchema = { callTemplate, params };
     const fields: SchemaField[] = [];
     for (const f of info.fields) {
@@ -112,22 +121,36 @@ export function buildTsRenderSchema(
 
 // Build a synthetic SchemaField that tells the consumer to render the
 // example body verbatim. Used when the request param's type is not a
-// parseable interface — a type alias to an array (JSON Patch), or a
-// discriminated union. The field's jsonKey is empty (passthroughBody
-// short-circuits the `jsonKey in body` filter); `kind` carries enough
-// type info that lists still recurse into typed item rendering.
+// parseable interface — a type alias to an array (JSON Patch), a
+// discriminated union, or an inline anonymous type. The field's jsonKey
+// is empty (passthroughBody short-circuits the `jsonKey in body`
+// filter); `kind` carries enough type info that lists still recurse
+// into typed item rendering.
+//
+// `typeFile`: the file that declares the named request type (if any) —
+// used to resolve type aliases like `type JsonPatch = T[]`.
+// `inlineTypeText`: the raw type expression on the param when the type
+// has no resolvable file (inline `T[]` or anonymous object). Either
+// signal yielding an array item type produces a `kind: "list"` field;
+// otherwise we fall back to `kind: "object"` (untyped fallback).
 function tsSyntheticPassthroughField(
     typeFile: string | null,
+    inlineTypeText: string | null,
+    clientFile: string,
     caches?: TsParseCaches,
 ): SchemaField {
     const aliased = typeFile ? tsReadArrayAliasItem(typeFile) : null;
-    if (aliased) {
-        // Synthetic owner: empty interface info anchored at the alias file
-        // so the existing nested-resolution path can walk sibling type
-        // files to find the item interface.
+    const inlineItem = !aliased && inlineTypeText ? tsExtractInlineArrayItem(inlineTypeText) : null;
+    const itemType = aliased ?? inlineItem;
+    if (itemType) {
+        // Synthetic owner: anchored at the alias file when we have one, or
+        // at the client file's parent so inline-array nested resolution
+        // walks the same `requests/` / `types/` directories the real
+        // parser would.
+        const ownerFile = typeFile ?? path.join(path.dirname(clientFile), "__synthetic__.ts");
         const owner: TsInterfaceInfo = {
             interfaceName: "<synthetic>",
-            filePath: typeFile!,
+            filePath: ownerFile,
             fields: [],
             enums: new Map(),
         };
@@ -136,13 +159,13 @@ function tsSyntheticPassthroughField(
             fieldTemplate: "{{value}}",
             kind: "list",
             required: true,
-            items: tsListItemField(aliased, owner, caches),
+            items: tsListItemField(itemType, owner, caches),
             passthroughBody: true,
         };
     }
     // Untyped fallback: TS/Python renderers treat `kind: "object"` with no
     // `nested` as "emit a language-native object literal" — exactly what
-    // we want for a discriminated-union body.
+    // we want for a discriminated-union body or an anonymous inline type.
     return {
         jsonKey: "",
         fieldTemplate: "{{value}}",
@@ -150,6 +173,19 @@ function tsSyntheticPassthroughField(
         required: true,
         passthroughBody: true,
     };
+}
+
+// Recognize inline array type syntax in a raw type expression and return
+// the element type text. Mirrors `tsReadArrayAliasItem` but operates on
+// the signature's raw text rather than a declaration file. Returns null
+// for non-array shapes (named types, unions, objects).
+export function tsExtractInlineArrayItem(typeText: string): string | null {
+    const t = typeText.trim();
+    const squareMatch = t.match(/^([\s\S]+?)\[\s*\]\s*$/);
+    if (squareMatch) return squareMatch[1].trim();
+    const genericMatch = t.match(/^(?:Array|ReadonlyArray)\s*<\s*([\s\S]+)\s*>\s*$/);
+    if (genericMatch) return genericMatch[1].trim();
+    return null;
 }
 
 // Recognize `export type Foo = Bar[]` / `Array<Bar>` / `ReadonlyArray<Bar>`
@@ -364,8 +400,17 @@ function tsUnwrapList(typeText: string): string {
 export interface TsSignatureInfo {
     // Trailing request-object parameter's type name (`phenoml.tools.CohortRequest`
     // → "CohortRequest"). Null when the method has no body parameter
-    // (e.g. a path-param-only GET with no query bundle).
+    // (e.g. a path-param-only GET with no query bundle) AND null when
+    // the param IS the body but its type is anonymous (e.g. an inline
+    // `JsonPatchOperation[]` array). The latter case is distinguished
+    // from "no body" by `wholeParamIsBody`.
     requestTypeName: string | null;
+    // Raw text of the trailing-param's type expression — set whenever the
+    // trailing param is the body, regardless of whether the type has a
+    // resolvable name. Used to detect inline array syntax (`T[]` /
+    // `Array<T>`) when `requestTypeName` is null so a synthetic
+    // passthrough body can still recurse into the item type.
+    requestTypeText: string | null;
     // Path/query params declared positionally BEFORE the request object,
     // in signature order. Fern places these first for endpoints whose URL
     // template embeds path variables.
@@ -419,6 +464,7 @@ export function tsExtractMethodSignatureInfo(
 
     const info: TsSignatureInfo = {
         requestTypeName: null,
+        requestTypeText: null,
         positionalParams: [],
         headerKeys: new Set(),
         passthroughBodyKey: null,
@@ -476,6 +522,7 @@ function classifyTsSignatureParams(
     }
     if (lastIsBody) {
         out.requestTypeName = lastTypeName;
+        out.requestTypeText = last.type ? source.slice(last.type.pos, last.type.end).trim() : null;
         // Mark whenever the param's full value IS the wire body (the private
         // method forwards it without destructuring). The synthetic-passthrough
         // fallback in buildTsRenderSchema only fires when the type ALSO fails

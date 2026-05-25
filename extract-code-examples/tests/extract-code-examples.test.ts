@@ -954,6 +954,7 @@ describe("TypeScript parser (Summary client fixture)", () => {
             "GET /fhir2summary/templates",
             "PATCH /agent/{id}",
             "PATCH /agent/{id}/add-auth-config",
+            "PATCH /agent/{id}/raw",
             "PATCH /fhir-provider/{fhir_provider_id}/fhir/{fhir_path}",
             "POST /agent/chat",
             "POST /agent/stream-chat",
@@ -1179,6 +1180,34 @@ describe("TypeScript parser (Summary client fixture)", () => {
         });
         // Items resolve through the types/ fallback so per-element fields
         // render as typed object literals, not raw JSON.
+        expect(fields[0].items?.kind).toBe("object");
+        const itemKeys = fields[0].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
+        expect(itemKeys).toEqual(["op", "path", "value", "from"]);
+    });
+
+    test("renderSchema synthesizes a passthrough list body when the trailing param's type is an inline array", () => {
+        // `patchRaw(id, request: JsonPatchOperation[])` — inline `T[]`
+        // syntax produces an ArrayTypeNode that tsTypeLastSegment can't
+        // name (the trailing `]` defeats the rightmost-identifier
+        // regex). Without the inline-array fallback the body would
+        // silently drop: `requestTypeName` is null even though the
+        // private method does `body: request`. The fix uses the raw
+        // type text to recover `kind: "list"` with resolved items.
+        const ep = endpoints.find((e) => e.methodName === "patchRaw")!;
+        expect(ep.renderSchema?.callTemplate).toBe(
+            "client.agent.patchRaw({{id}}, {{__body__}})",
+        );
+        const fields = ep.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "list",
+            passthroughBody: true,
+        });
+        // Items resolve through the same types/ fallback the named-alias
+        // path uses, so per-element JsonPatchOperation fields render
+        // typed (not raw JSON).
         expect(fields[0].items?.kind).toBe("object");
         const itemKeys = fields[0].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
         expect(itemKeys).toEqual(["op", "path", "value", "from"]);

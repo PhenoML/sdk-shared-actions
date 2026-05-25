@@ -174,4 +174,32 @@ export class AgentClient {
         if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
         return handleNonStatusCodeError(_response.error, _response.rawResponse, "PATCH", "/agent/{id}/add-auth-config");
     }
+
+    // Anonymous inline array request type. Fern usually emits a named
+    // alias (`phenoml.agent.JsonPatch`), but a defensive guard covers
+    // signatures whose trailing param is declared inline as `T[]` — no
+    // resolvable type name, so tsTypeLastSegment returns null. Without
+    // the inline-array path, the body would silently drop because
+    // `requestTypeName` is null even though the param IS the body.
+    public patchRaw(
+        id: string,
+        request: phenoml.agent.JsonPatchOperation[],
+        requestOptions?: AgentClient.RequestOptions,
+    ): core.HttpResponsePromise<unknown> {
+        return core.HttpResponsePromise.fromPromise(this.__patchRaw(id, request, requestOptions));
+    }
+
+    private async __patchRaw(
+        id: string,
+        request: phenoml.agent.JsonPatchOperation[],
+        requestOptions?: AgentClient.RequestOptions,
+    ): Promise<core.WithRawResponse<unknown>> {
+        const _response = await (this._options.fetcher ?? core.fetcher)({
+            url: `https://example/agent/${id}/raw`,
+            method: "PATCH",
+            body: request,
+        });
+        if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
+        return handleNonStatusCodeError(_response.error, _response.rawResponse, "PATCH", "/agent/{id}/raw");
+    }
 }
