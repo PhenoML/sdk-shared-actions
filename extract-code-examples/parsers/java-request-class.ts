@@ -42,18 +42,23 @@ export interface JavaClassInfo {
 // Build a (possibly nested) `BodySchema` for a Fern Java request class.
 // `headerJsonKeys` lists keys the raw client diverts to HTTP headers — they
 // are part of the class but NOT the body. `bodyJsonKeys`, when set, narrows
-// further to an explicit `properties.put(...)` list. `visited` is reused
-// across recursive calls to prevent cycles in self-referential schemas.
+// further to an explicit `properties.put(...)` list. `passthroughField`,
+// when set, names the request-class field (camelCase) whose value IS the
+// wire body — the emitted SchemaField for that field is marked
+// `passthroughBody: true`. `visited` is reused across recursive calls to
+// prevent cycles in self-referential schemas.
 export function buildJavaBodySchema(
     classInfo: JavaClassInfo,
     options: {
         headerJsonKeys?: Set<string>;
         bodyJsonKeys?: string[];
+        passthroughField?: string;
         visited?: Set<string>;
     } = {},
 ): BodySchema {
     const headers = options.headerJsonKeys ?? new Set<string>();
     const explicitBody = options.bodyJsonKeys;
+    const passthroughField = options.passthroughField;
     const visited = options.visited ?? new Set<string>();
 
     const eligible = classInfo.fields.filter((f) => {
@@ -77,9 +82,11 @@ export function buildJavaBodySchema(
         if (!seen.has(f.fieldName)) ordered.push(f);
     }
 
-    const fields: SchemaField[] = ordered.map((f) =>
-        toSchemaField(f, classInfo, visited),
-    );
+    const fields: SchemaField[] = ordered.map((f) => {
+        const sf = toSchemaField(f, classInfo, visited);
+        if (passthroughField === f.fieldName) sf.passthroughBody = true;
+        return sf;
+    });
 
     return {
         // Each Java setter is invoked as a fluent chain — no separator
@@ -372,6 +379,14 @@ export function parseJavaFieldDeclarations(source: string): JavaFieldInfo[] {
     return out;
 }
 
+// Fern getters camelCase the field, so "getPhenomlOnBehalfOf" → field
+// "phenomlOnBehalfOf". Lowercase only the leading character to leave
+// acronyms like "URL" alone (defensive — Fern doesn't actually keep
+// acronym casing, but doing it this way mirrors Java conventions).
+export function javaGetterSuffixToField(suffix: string): string {
+    return suffix[0].toLowerCase() + suffix.slice(1);
+}
+
 // Walk `@JsonProperty("wire-name") ... getFieldName()` pairs and produce a
 // fieldName → wire-name map. Fern emits both the annotation and the camel
 // getter in lockstep, so a regex over the (annotation, getter) pair is
@@ -380,14 +395,7 @@ export function parseJavaJsonProperties(source: string): Map<string, string> {
     const out = new Map<string, string>();
     const pattern = /@JsonProperty\s*\(\s*"([^"]+)"\s*\)\s*[\s\S]*?public\s+\S[^()]*\s+get(\w+)\s*\(/g;
     for (const m of source.matchAll(pattern)) {
-        const jsonKey = m[1];
-        const getterSuffix = m[2];
-        // Fern getters camelCase the field, so "getPhenomlOnBehalfOf" → field
-        // "phenomlOnBehalfOf". Lowercase only the leading character to leave
-        // acronyms like "URL" alone (defensive — Fern doesn't actually keep
-        // acronym casing, but doing it this way mirrors Java conventions).
-        const fieldName = getterSuffix[0].toLowerCase() + getterSuffix.slice(1);
-        out.set(fieldName, jsonKey);
+        out.set(javaGetterSuffixToField(m[2]), m[1]);
     }
     return out;
 }
@@ -425,8 +433,7 @@ export function parseJavaJsonIgnoredFields(source: string): Set<string> {
     const out = new Set<string>();
     const pattern = /@JsonIgnore\s*[\s\S]*?public\s+\S[^()]*\s+get(\w+)\s*\(/g;
     for (const m of source.matchAll(pattern)) {
-        const fieldName = m[1][0].toLowerCase() + m[1].slice(1);
-        out.add(fieldName);
+        out.add(javaGetterSuffixToField(m[1]));
     }
     return out;
 }

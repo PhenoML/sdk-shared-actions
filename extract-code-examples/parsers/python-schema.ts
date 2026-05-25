@@ -235,7 +235,9 @@ export function buildPythonRenderSchema(
         // Treat path-param kwargs as schema fields so the consumer can
         // supply them via the same input map as body fields.
         const jsonKey = endpoint.bodyParamMap?.[kw.name] ?? kw.name;
-        fields.push(pyToSchemaField(kw, jsonKey));
+        const field = pyToSchemaField(kw, jsonKey);
+        if (endpoint.bodyPassthroughKwarg === kw.name) field.passthroughBody = true;
+        fields.push(field);
     }
 
     const body: BodySchema | undefined = fields.length > 0
