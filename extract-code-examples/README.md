@@ -85,9 +85,10 @@ language-agnostic algorithm. The algorithm is ~30 lines:
 ```
 function renderCall(example, body, pathParams):
   // Render the body fields the user supplied, ordered by the schema.
-  // `passthroughBody` (Python-only): the field's value is the entire `body`,
-  // not `body[jsonKey]` — used for PATCH endpoints whose wire body is a
-  // top-level JSON Patch array rather than an object.
+  // `passthroughBody`: the field's value is the entire `body`, not
+  // `body[jsonKey]` — used by all three languages for PATCH endpoints
+  // whose wire body is a top-level JSON Patch array rather than an
+  // object. See "Passthrough body fields" below.
   bodyStr = example.render.body
     ? example.render.body.fields
         .filter(f => f.passthroughBody || f.jsonKey in body)
