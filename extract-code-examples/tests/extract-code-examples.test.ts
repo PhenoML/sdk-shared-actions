@@ -945,13 +945,14 @@ describe("TypeScript parser (Summary client fixture)", () => {
     const endpoints = parser.parseEndpoints(root);
     const examples = parser.parseTestExamples(root);
 
-    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming/chat/get endpoints", () => {
+    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming/chat/get endpoints and fhir patch", () => {
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /fhir2summary/template/{id}",
             "GET /agent/{agent_id}",
             "GET /fhir2summary/template/{id}",
             "GET /fhir2summary/templates",
+            "PATCH /fhir-provider/{fhir_provider_id}/fhir/{fhir_path}",
             "POST /agent/chat",
             "POST /agent/stream-chat",
             "POST /fhir2summary/create",
@@ -1126,6 +1127,27 @@ describe("TypeScript parser (Summary client fixture)", () => {
         const keys = stream.renderSchema?.body?.fields.map((f) => f.jsonKey) ?? [];
         expect(keys).toContain("X-Phenoml-On-Behalf-Of");
         expect(keys).toContain("message");
+    });
+
+    test("renderSchema marks the passthrough body field for PATCH endpoints", () => {
+        // `fhir.patch` destructures `body: _body` (no rest binding) and
+        // hands `_body` to the fetcher, so the wire body is the JSON
+        // Patch array — NOT `{body: [...]}`. Without `passthroughBody`
+        // the consumer's `body["body"]` lookup would miss it entirely,
+        // and the no-rest destructure pattern would leak the X-headers
+        // into `body.fields`.
+        const patch = endpoints.find((e) => e.methodName === "patch")!;
+        const fields = patch.renderSchema?.body?.fields ?? [];
+        const keys = fields.map((f) => f.jsonKey);
+        expect(keys).toContain("body");
+        expect(keys).not.toContain("X-Phenoml-On-Behalf-Of");
+        expect(keys).not.toContain("X-Phenoml-Fhir-Provider");
+        const bodyField = fields.find((f) => f.jsonKey === "body");
+        expect(bodyField).toMatchObject({
+            jsonKey: "body",
+            kind: "list",
+            passthroughBody: true,
+        });
     });
 });
 
@@ -1326,6 +1348,32 @@ describe("Python parser (Authtoken auth fixture)", () => {
             kind: "string",
             required: true,
         });
+    });
+
+    test("renderSchema marks the passthrough body kwarg so consumers don't index it by jsonKey", () => {
+        // users.patch_user passes `request` directly as the JSON payload
+        // (`json=convert_and_respect_annotation_metadata(object_=request, ...)`).
+        // The wire body is the raw JSON Patch array, NOT `{"request": [...]}`,
+        // so the consumer's renderer must source the value from `body`
+        // itself rather than `body["request"]`. Without the
+        // `passthroughBody` flag the field would be dropped by the
+        // `f.jsonKey in body` filter (an array has no `request` property)
+        // and the rendered call would omit the patch payload entirely.
+        const patchUser = endpoints.find((e) => e.methodName === "patch_user")!;
+        expect(patchUser.bodyPassthroughKwarg).toBe("request");
+        const fields = patchUser.renderSchema?.body?.fields ?? [];
+        const requestField = fields.find((f) => f.jsonKey === "request");
+        expect(requestField).toMatchObject({
+            jsonKey: "request",
+            fieldTemplate: "request={{value}}",
+            kind: "list",
+            passthroughBody: true,
+        });
+        // Path-param fields must NOT be marked passthrough — they're
+        // ordinary kwargs whose value comes from somewhere else (URL),
+        // not from the wire body.
+        const userIdField = fields.find((f) => f.jsonKey === "user_id");
+        expect(userIdField?.passthroughBody).toBeUndefined();
     });
 });
 
@@ -1671,6 +1719,26 @@ describe("Java parser (rich schema fixture)", () => {
             ".description({{value}})",
         ]);
         expect(createAgent.renderSchema?.body?.fieldSeparator).toBe("");
+    });
+
+    test("marks the passthrough body field for raw clients that unwrap a single getter", () => {
+        // fhir.patch builds its wire body via
+        // `writeValueAsBytes(request.getBody())` — the JSON Patch array is
+        // shipped verbatim, NOT wrapped under a "body" key. The renderer
+        // must mark the `body` field with passthroughBody so the consumer
+        // sources the value from the wire body itself rather than
+        // body["body"] (which would be undefined). The two @JsonIgnore
+        // header fields are excluded from the schema as usual.
+        const patch = endpoints.find((e) => e.methodName === "patch")!;
+        expect(patch.javaBodyPassthroughField).toBe("body");
+        const fields = patch.renderSchema?.body?.fields ?? [];
+        expect(fields.map((f) => f.jsonKey)).toEqual(["body"]);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "body",
+            fieldTemplate: ".body({{value}})",
+            kind: "list",
+            passthroughBody: true,
+        });
     });
 });
 

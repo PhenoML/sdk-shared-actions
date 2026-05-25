@@ -85,7 +85,9 @@ export function buildTsRenderSchema(
     const fields: SchemaField[] = [];
     for (const f of info.fields) {
         if (sigInfo.headerKeys.has(f.jsonKey)) continue;
-        fields.push(tsToSchemaField(f, info, caches));
+        const sf = tsToSchemaField(f, info, caches);
+        if (sigInfo.passthroughBodyKey === f.jsonKey) sf.passthroughBody = true;
+        fields.push(sf);
     }
     if (fields.length === 0) return fallback;
 
@@ -280,6 +282,10 @@ export interface TsSignatureInfo {
     // Property keys destructured out of `request` in the private __method
     // body — those ship as headers and must be excluded from body.fields.
     headerKeys: Set<string>;
+    // Wire key whose value IS the wire body (not `body[jsonKey]`), set on
+    // the `const { ..., body: _body } = request; ... body: _body` no-rest
+    // pattern. Feeds `SchemaField.passthroughBody`.
+    passthroughBodyKey: string | null;
 }
 
 // Extract path params, request type, and header destructuring for one
@@ -299,6 +305,7 @@ export function tsExtractMethodSignatureInfo(
         requestTypeName: null,
         positionalParams: [],
         headerKeys: new Set(),
+        passthroughBodyKey: null,
     };
 
     function visit(node: ts.Node) {
@@ -307,7 +314,7 @@ export function tsExtractMethodSignatureInfo(
                 classifyTsSignatureParams(node.parameters, source, info);
             }
             if (node.name.text === `__${methodName}` && node.body) {
-                tsCollectDestructuredHeaderKeys(node.body, info.headerKeys);
+                tsCollectRequestBindings(node.body, info);
             }
         }
         ts.forEachChild(node, visit);
@@ -352,14 +359,42 @@ function tsInferParamKind(typeText: string): SchemaFieldKind {
     return "string";
 }
 
-// Walk a private __method body for the `const {"X-Header": id, ..._body} =
-// request;` pattern Fern emits when forwarding headers and shipping the
-// remainder as body. The REST binding is the discriminator: destructures
-// without a `..._body` rest are used elsewhere (e.g. `const { version } =
-// request` extracts a single field for query params, NOT headers) — we
-// must not flag those keys as headers or they vanish from the body schema.
-function tsCollectDestructuredHeaderKeys(body: ts.Block, out: Set<string>) {
+// Walk a private __method body for two Fern patterns:
+//
+//   const { "X-Header": id, ..._body } = request;
+//   ...
+//   body: _body,                       // fetcher arg
+//
+// → `id`'s wire key is a header, `_body` (and the rest of `request`) is
+// the wire body. This is the common case.
+//
+//   const { "X-Header": id, body: _body } = request;
+//   ...
+//   body: _body,                       // fetcher arg
+//
+// → `id`'s wire key is a header, and the interface's `body` property's
+// value IS the wire body (e.g. a JSON Patch array on PATCH endpoints).
+// Mark that wire key as the passthrough body key.
+//
+// Destructures without rest AND without a matching body arg (e.g. `const
+// { version } = request` for query params) are left alone — flagging
+// `version` as a header would drop it from the body schema entirely.
+function tsCollectRequestBindings(body: ts.Block, out: TsSignatureInfo) {
+    // Single AST pass: collect the fetcher's `body: <ident>` arg AND every
+    // `const {...} = request` destructure. We can't classify destructures
+    // until `bodyArgIdent` is known, so defer classification until after
+    // the walk.
+    let bodyArgIdent: string | null = null;
+    const destructures: ts.ObjectBindingPattern[] = [];
     function visit(node: ts.Node) {
+        if (
+            ts.isPropertyAssignment(node) &&
+            ts.isIdentifier(node.name) &&
+            node.name.text === "body" &&
+            ts.isIdentifier(node.initializer)
+        ) {
+            bodyArgIdent = node.initializer.text;
+        }
         if (
             ts.isVariableDeclaration(node) &&
             ts.isObjectBindingPattern(node.name) &&
@@ -367,19 +402,51 @@ function tsCollectDestructuredHeaderKeys(body: ts.Block, out: Set<string>) {
             ts.isIdentifier(node.initializer) &&
             node.initializer.text === "request"
         ) {
-            const hasRestBinding = node.name.elements.some((el) => !!el.dotDotDotToken);
-            if (!hasRestBinding) return;
-            for (const el of node.name.elements) {
-                if (el.dotDotDotToken) continue;
-                const wire = el.propertyName
-                    ? tsPropertyNameText(el.propertyName)
-                    : (ts.isIdentifier(el.name) ? el.name.text : null);
-                if (wire) out.add(wire);
-            }
+            destructures.push(node.name);
         }
         ts.forEachChild(node, visit);
     }
     visit(body);
+    for (const pattern of destructures) {
+        classifyTsRequestDestructure(pattern, bodyArgIdent, out);
+    }
+}
+
+function classifyTsRequestDestructure(
+    pattern: ts.ObjectBindingPattern,
+    bodyArgIdent: string | null,
+    out: TsSignatureInfo,
+): void {
+    const restEl = pattern.elements.find((el) => !!el.dotDotDotToken);
+    // The identifier passed to the fetcher's `body:` arg may match an
+    // explicit destructure element; when it does, that element's wire key
+    // is the passthrough body field. Only relevant in the no-rest case
+    // (a `...rest` binding always represents the body in Fern's output).
+    const passthroughEl = !restEl && bodyArgIdent
+        ? pattern.elements.find(
+              (el) => !el.dotDotDotToken && ts.isIdentifier(el.name) && el.name.text === bodyArgIdent,
+          )
+        : undefined;
+    // Neither pattern matched → query-param destructure (e.g. `const
+    // { version } = request`); leave its keys alone or they vanish from
+    // the body schema.
+    if (!restEl && !passthroughEl) return;
+    for (const el of pattern.elements) {
+        if (el.dotDotDotToken) continue;
+        const wire = tsBindingWireKey(el);
+        if (!wire) continue;
+        if (el === passthroughEl) {
+            out.passthroughBodyKey = wire;
+        } else {
+            out.headerKeys.add(wire);
+        }
+    }
+}
+
+function tsBindingWireKey(el: ts.BindingElement): string | null {
+    if (el.propertyName) return tsPropertyNameText(el.propertyName);
+    if (ts.isIdentifier(el.name)) return el.name.text;
+    return null;
 }
 
 function tsPropertyNameText(name: ts.PropertyName): string | null {

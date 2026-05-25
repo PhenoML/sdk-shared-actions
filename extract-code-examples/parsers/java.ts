@@ -14,6 +14,7 @@ import {
     JAVA_PRIMITIVE_KIND,
     buildJavaBodySchema,
     findJavaClassFile,
+    javaGetterSuffixToField,
     parseJavaClass,
 } from "./java-request-class";
 import { camelToSnake, findFiles, normalizePath } from "../utils";
@@ -210,6 +211,7 @@ export function javaExtractEndpoints(
     let positionalParams: { name: string; type: string }[] = [];
     let bodyJsonKeys: string[] | null = null;
     let headerJsonKeys: string[] = [];
+    let bodyPassthroughField: string | null = null;
     // Accumulates the current Java statement across line breaks so calls
     // like `_requestBuilder.addHeader(\n  "X-...", request.getX());` are
     // matchable as a single string. Reset on `;`. Lightweight — we don't
@@ -218,6 +220,17 @@ export function javaExtractEndpoints(
     let stmtBuf = "";
     const seen = new Set<string>();
     const lexState = { inBlockComment: false, inTextBlock: false };
+
+    // Wipe the per-method body-scanning state. Called on method enter
+    // (defensive) and on method exit. The method-context locals
+    // (currentMethod, requestClassName, etc.) are managed at their own
+    // call sites since they're set from the signature classification.
+    const resetScanState = () => {
+        bodyJsonKeys = null;
+        headerJsonKeys = [];
+        bodyPassthroughField = null;
+        stmtBuf = "";
+    };
 
     // Closes over the loop locals so call sites just announce "save what
     // we've gathered so far". No-ops when the gathered state is incomplete.
@@ -238,6 +251,7 @@ export function javaExtractEndpoints(
         if (positionalParams.length > 0) entry.javaPositionalParams = positionalParams;
         if (bodyJsonKeys !== null) entry.javaBodyJsonKeys = bodyJsonKeys;
         if (headerJsonKeys.length > 0) entry.javaHeaderJsonKeys = headerJsonKeys;
+        if (bodyPassthroughField !== null) entry.javaBodyPassthroughField = bodyPassthroughField;
         endpoints.push(entry);
     };
 
@@ -277,9 +291,7 @@ export function javaExtractEndpoints(
             requestClassName = classified.requestClass;
             bodyParamName = classified.bodyParamName;
             positionalParams = classified.positional;
-            bodyJsonKeys = null;
-            headerJsonKeys = [];
-            stmtBuf = "";
+            resetScanState();
         }
 
         // Arm on the line where `{` lifts braceDepth above the enclosing scope.
@@ -293,9 +305,7 @@ export function javaExtractEndpoints(
             requestClassName = null;
             bodyParamName = null;
             positionalParams = [];
-            bodyJsonKeys = null;
-            headerJsonKeys = [];
-            stmtBuf = "";
+            resetScanState();
         }
 
         if (!currentMethod) continue;
@@ -326,12 +336,13 @@ export function javaExtractEndpoints(
         if (bodyParamName !== null) {
             stmtBuf += " " + line;
             if (line.endsWith(";") || line.endsWith("};")) {
-                javaScanBodyStatement(stmtBuf, bodyParamName, (key) => {
+                const scanned = javaScanBodyStatement(stmtBuf, bodyParamName);
+                if (scanned.bodyKeys.length > 0) {
                     if (bodyJsonKeys === null) bodyJsonKeys = [];
-                    bodyJsonKeys.push(key);
-                }, (headerKey) => {
-                    headerJsonKeys.push(headerKey);
-                });
+                    bodyJsonKeys.push(...scanned.bodyKeys);
+                }
+                headerJsonKeys.push(...scanned.headerKeys);
+                if (scanned.passthroughField !== null) bodyPassthroughField = scanned.passthroughField;
                 stmtBuf = "";
             }
         }
@@ -453,6 +464,7 @@ export function buildJavaRenderSchema(
                 body = buildJavaBodySchema(classInfo, {
                     headerJsonKeys: new Set(endpoint.javaHeaderJsonKeys ?? []),
                     bodyJsonKeys: endpoint.javaBodyJsonKeys,
+                    passthroughField: endpoint.javaBodyPassthroughField,
                 });
             }
         }
@@ -483,26 +495,48 @@ function javaInferParamKind(type: string): SchemaFieldKind {
     return JAVA_PRIMITIVE_KIND[type.trim()] ?? "string";
 }
 
+// Hoisted at module scope so a per-statement scan doesn't reallocate the
+// regex objects. All three are stateful (the `g` flag); `matchAll` resets
+// `lastIndex` on each call, so concurrent use across statements is safe.
+const JAVA_PROPS_PUT_RE = /\bproperties\.put\s*\(\s*"([^"]+)"\s*,/g;
+const JAVA_ADD_HEADER_RE = /\.addHeader\s*\(\s*"([^"]+)"\s*,\s*([^)]*)/g;
+// Distinct from `writeValueAsBytes(<bodyParam>)` which serializes the
+// whole class; this matches only the single-getter unwrap. The receiver
+// identifier is captured and the caller filters to `bodyParamName`.
+const JAVA_PASSTHROUGH_WRITE_RE = /\bwriteValueAsBytes\s*\(\s*(\w+)\.get(\w+)\s*\(\s*\)\s*\)/g;
+
 // Inspect a single (line-joined) Java statement for body-field and
-// header-field signals. We look for two patterns Fern uses inside raw
+// header-field signals. We look for three patterns Fern uses inside raw
 // client methods:
 //   `properties.put("jsonKey", request.getFoo())` — explicit body field
 //   `.addHeader("X-...", request.getFoo()...)`    — body-class header
+//   `writeValueAsBytes(request.getFoo())`         — passthrough body (only
+//                                                   the getter's value
+//                                                   ships, not the
+//                                                   whole `request`)
 // The body-param identifier (`request` in Fern's output) is supplied by
 // the caller so we only count calls that pull from THAT param, not e.g.
 // `clientOptions.headers(...)`.
 function javaScanBodyStatement(
     stmt: string,
     bodyParamName: string,
-    onBodyKey: (key: string) => void,
-    onHeaderKey: (key: string) => void,
-): void {
-    for (const m of stmt.matchAll(/\bproperties\.put\s*\(\s*"([^"]+)"\s*,/g)) {
-        onBodyKey(m[1]);
+): {
+    bodyKeys: string[];
+    headerKeys: string[];
+    passthroughField: string | null;
+} {
+    const bodyKeys: string[] = [];
+    const headerKeys: string[] = [];
+    let passthroughField: string | null = null;
+    for (const m of stmt.matchAll(JAVA_PROPS_PUT_RE)) bodyKeys.push(m[1]);
+    for (const m of stmt.matchAll(JAVA_ADD_HEADER_RE)) {
+        if (m[2].includes(`${bodyParamName}.`)) headerKeys.push(m[1]);
     }
-    for (const m of stmt.matchAll(/\.addHeader\s*\(\s*"([^"]+)"\s*,\s*([^)]*)/g)) {
-        if (m[2].includes(`${bodyParamName}.`)) onHeaderKey(m[1]);
+    for (const m of stmt.matchAll(JAVA_PASSTHROUGH_WRITE_RE)) {
+        if (m[1] !== bodyParamName) continue;
+        passthroughField = javaGetterSuffixToField(m[2]);
     }
+    return { bodyKeys, headerKeys, passthroughField };
 }
 
 // Classify Fern-generated signature params. The Fern Java codegen places

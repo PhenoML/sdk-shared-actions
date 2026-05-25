@@ -49,6 +49,11 @@ export interface EndpointMapping {
     // request body param on the SDK method. These are the positional
     // path/query args the consumer must supply alongside the body.
     javaPositionalParams?: { name: string; type: string }[];
+    // Java-only: camelCase field name of the request class whose value IS
+    // the wire body, set when the raw client unwraps a single getter
+    // (`writeValueAsBytes(request.getBody())`) instead of serializing the
+    // whole object. Feeds `SchemaField.passthroughBody`.
+    javaBodyPassthroughField?: string;
     // Built during a second pass after the file walk; carries the per-
     // endpoint information consumers need to render the SDK call from a
     // user-supplied body. Optional during incremental rollout; when set,
@@ -182,6 +187,16 @@ export interface SchemaField {
     // `.role(AgentRole role)` would receive `.role("assistant")` which
     // doesn't typecheck.
     enumConstants?: Record<string, string>;
+    // When true, the field's value IS the entire wire request body, not
+    // `body[jsonKey]`. Set when the raw client unwraps a single sub-value
+    // instead of serializing the whole request:
+    //   Python: `json=<kwarg>` / `json=convert_and_respect_annotation_metadata(object_=<kwarg>, ...)`
+    //   TS:     `const { body: _body } = request; ... body: _body`
+    //   Java:   `writeValueAsBytes(request.getX())`
+    // Common on PATCH endpoints whose wire body is a top-level JSON Patch
+    // array. Without this, consumers indexing by jsonKey would miss the
+    // value entirely — an array has no `body` / `request` property.
+    passthroughBody?: boolean;
 }
 
 export type SchemaFieldKind =

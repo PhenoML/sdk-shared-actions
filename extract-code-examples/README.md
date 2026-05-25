@@ -85,10 +85,17 @@ language-agnostic algorithm. The algorithm is ~30 lines:
 ```
 function renderCall(example, body, pathParams):
   // Render the body fields the user supplied, ordered by the schema.
+  // `passthroughBody`: the field's value is the entire `body`, not
+  // `body[jsonKey]` — used by all three languages for PATCH endpoints
+  // whose wire body is a top-level JSON Patch array rather than an
+  // object. See "Passthrough body fields" below.
   bodyStr = example.render.body
     ? example.render.body.fields
-        .filter(f => f.jsonKey in body)
-        .map(f => f.fieldTemplate.replace("{{value}}", renderValue(body[f.jsonKey], f)))
+        .filter(f => f.passthroughBody || f.jsonKey in body)
+        .map(f => {
+          const value = f.passthroughBody ? body : body[f.jsonKey]
+          return f.fieldTemplate.replace("{{value}}", renderValue(value, f))
+        })
         .join(example.render.body.fieldSeparator)
     : ""
 
@@ -180,6 +187,16 @@ Every key in `renderRules` is required so the consumer's `renderValue` algorithm
 | `fieldSeparator`    | `", "`                                    | `", "`                     | `""` (each field begins with `.`)   |
 | `fieldTemplate`     | `"key": {{value}}`                        | `key={{value}}`            | `.setter({{value}})`                |
 | Path params         | `params[]` (positional, before body)      | inside body schema (kwargs) | `params[]` (positional, before body) |
+
+#### Passthrough body fields
+
+Some endpoints' raw clients send a single sub-value as the wire payload instead of the whole request object. PATCH endpoints whose body is a top-level JSON Patch array are the common case:
+
+- **Python**: `json=convert_and_respect_annotation_metadata(object_=request, ...)` or bare `json=<kwarg>` — the kwarg's value IS the wire body.
+- **TypeScript**: `const { "X-Header": header, body: _body } = request; ... body: _body` — the `body` interface property's value IS the wire body. (Headers destructured alongside without a `...rest` binding are still recognized and excluded from the body schema.)
+- **Java**: `RequestBody.create(writeValueAsBytes(request.getBody()), ...)` — only `request.getBody()` ships; the rest of the request class is read for headers (via `addHeader(...)`) or unused.
+
+In each case, the schema field for that property carries `passthroughBody: true` so the consumer's renderer sources the value from `body` directly rather than `body[jsonKey]` — the latter fails when the wire body isn't an object (a JSON Patch array has no `body` / `request` property). The flag is absent on every other field, including ordinary body fields and path-param kwargs.
 
 #### Schema completeness
 
