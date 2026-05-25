@@ -71,17 +71,33 @@ export function buildTsRenderSchema(
         name: camelToSnake(p.name),
         kind: p.kind,
     }));
-    const callTemplate = tsCallTemplate(endpoint, params, !!sigInfo?.requestTypeName);
+    const hasBody = !!sigInfo?.requestTypeName;
+
+    if (!sigInfo?.requestTypeName) {
+        return { callTemplate: tsCallTemplate(endpoint, params, hasBody, false), params };
+    }
+
+    const typeFile = tsResolveRequestTypePath(clientFile, sigInfo.requestTypeName);
+    const info = typeFile ? tsParseRequestInterfaceCached(typeFile, caches) : null;
+
+    // No interface available — either the file lives under types/ and is a
+    // type alias (e.g. `type JsonPatch = JsonPatchOperation[]`), or the
+    // request is a discriminated union we bailed on. When the param's full
+    // value IS the wire body, synthesize a single passthrough field so the
+    // consumer renders the example body verbatim instead of dropping it.
+    // The call template skips `{ }` wrapping in this branch — the rendered
+    // body literal (`[...]` or `{...}`) supplies its own delimiters.
+    if (!info) {
+        if (!sigInfo.wholeParamIsBody) {
+            return { callTemplate: tsCallTemplate(endpoint, params, hasBody, false), params };
+        }
+        const callTemplate = tsCallTemplate(endpoint, params, hasBody, true);
+        const synthetic = tsSyntheticPassthroughField(typeFile, caches);
+        return { callTemplate, params, body: { fieldSeparator: "", fields: [synthetic] } };
+    }
+
+    const callTemplate = tsCallTemplate(endpoint, params, hasBody, false);
     const fallback: RenderSchema = { callTemplate, params };
-
-    if (!sigInfo?.requestTypeName) return fallback;
-
-    const interfaceFile = tsResolveRequestInterfacePath(clientFile, sigInfo.requestTypeName);
-    if (!interfaceFile) return fallback;
-
-    const info = tsParseRequestInterfaceCached(interfaceFile, caches);
-    if (!info) return fallback;
-
     const fields: SchemaField[] = [];
     for (const f of info.fields) {
         if (sigInfo.headerKeys.has(f.jsonKey)) continue;
@@ -92,6 +108,72 @@ export function buildTsRenderSchema(
     if (fields.length === 0) return fallback;
 
     return { callTemplate, params, body: { fieldSeparator: ", ", fields } };
+}
+
+// Build a synthetic SchemaField that tells the consumer to render the
+// example body verbatim. Used when the request param's type is not a
+// parseable interface — a type alias to an array (JSON Patch), or a
+// discriminated union. The field's jsonKey is empty (passthroughBody
+// short-circuits the `jsonKey in body` filter); `kind` carries enough
+// type info that lists still recurse into typed item rendering.
+function tsSyntheticPassthroughField(
+    typeFile: string | null,
+    caches?: TsParseCaches,
+): SchemaField {
+    const aliased = typeFile ? tsReadArrayAliasItem(typeFile) : null;
+    if (aliased) {
+        // Synthetic owner: empty interface info anchored at the alias file
+        // so the existing nested-resolution path can walk sibling type
+        // files to find the item interface.
+        const owner: TsInterfaceInfo = {
+            interfaceName: "<synthetic>",
+            filePath: typeFile!,
+            fields: [],
+            enums: new Map(),
+        };
+        return {
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "list",
+            required: true,
+            items: tsListItemField(aliased, owner, caches),
+            passthroughBody: true,
+        };
+    }
+    // Untyped fallback: TS/Python renderers treat `kind: "object"` with no
+    // `nested` as "emit a language-native object literal" — exactly what
+    // we want for a discriminated-union body.
+    return {
+        jsonKey: "",
+        fieldTemplate: "{{value}}",
+        kind: "object",
+        required: true,
+        passthroughBody: true,
+    };
+}
+
+// Recognize `export type Foo = Bar[]` / `Array<Bar>` / `ReadonlyArray<Bar>`
+// and return the inner item type text. Returns null for non-array aliases
+// (unions, primitives, intersections).
+function tsReadArrayAliasItem(filePath: string): string | null {
+    if (!fs.existsSync(filePath)) return null;
+    const source = fs.readFileSync(filePath, "utf-8");
+    const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
+    for (const stmt of sf.statements) {
+        if (!ts.isTypeAliasDeclaration(stmt)) continue;
+        const t = stmt.type;
+        if (ts.isArrayTypeNode(t)) {
+            return source.slice(t.elementType.pos, t.elementType.end).trim();
+        }
+        if (ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName)) {
+            const name = t.typeName.text;
+            if ((name === "Array" || name === "ReadonlyArray") && t.typeArguments?.length === 1) {
+                const arg = t.typeArguments[0];
+                return source.slice(arg.pos, arg.end).trim();
+            }
+        }
+    }
+    return null;
 }
 
 function tsParseRequestInterfaceCached(
@@ -114,11 +196,20 @@ function tsGetSourceFile(filePath: string, caches?: TsParseCaches): ts.SourceFil
     return sf;
 }
 
-function tsCallTemplate(endpoint: EndpointMapping, params: ParamField[], hasBody: boolean): string {
+function tsCallTemplate(
+    endpoint: EndpointMapping,
+    params: ParamField[],
+    hasBody: boolean,
+    passthroughOnly: boolean,
+): string {
     const accessors = endpoint.methodChain.slice(0, -1);
     const chainStr = ["client", ...accessors].join(".") + "." + endpoint.methodName;
     const positional = params.map((p) => `{{${p.name}}}`);
-    const args = hasBody ? [...positional, "{ {{__body__}} }"] : positional;
+    // `passthroughOnly`: the param's full value IS the wire body, rendered
+    // as a self-delimiting literal (`[...]`, `{...}`). Wrapping in extra
+    // braces would produce `{ [...] }` — broken syntax.
+    const bodySlot = passthroughOnly ? "{{__body__}}" : "{ {{__body__}} }";
+    const args = hasBody ? [...positional, bodySlot] : positional;
     return `${chainStr}(${args.join(", ")})`;
 }
 
@@ -286,6 +377,13 @@ export interface TsSignatureInfo {
     // the `const { ..., body: _body } = request; ... body: _body` no-rest
     // pattern. Feeds `SchemaField.passthroughBody`.
     passthroughBodyKey: string | null;
+    // True when the private __method passes the trailing public param
+    // straight to the fetcher (`body: <paramName>` with no destructure of
+    // that param). The whole param's value IS the wire body — used to
+    // recognize bodies whose type is an alias (e.g. `JsonPatch =
+    // JsonPatchOperation[]`) or a discriminated union that doesn't end in
+    // `Request`. Drives the passthrough-only render path.
+    wholeParamIsBody: boolean;
 }
 
 // Extract path params, request type, and header destructuring for one
@@ -301,35 +399,60 @@ export function tsExtractMethodSignatureInfo(
     if (!sf) return null;
     const source = sf.getFullText();
 
+    // Two-pass collection: __method body tells us whether a param is used
+    // directly as the wire body (`body: paramName`) — a signal the public-
+    // signature classifier needs to widen "is body" past the `*Request`
+    // type-name heuristic (e.g. `request: phenoml.agent.JsonPatch`).
+    let publicMethod: ts.MethodDeclaration | null = null;
+    let privateBody: ts.Block | null = null;
+    function find(node: ts.Node) {
+        if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
+            if (node.name.text === methodName) publicMethod = node;
+            if (node.name.text === `__${methodName}` && node.body) privateBody = node.body;
+        }
+        ts.forEachChild(node, find);
+    }
+    find(sf);
+    if (!publicMethod) return null;
+
+    const bodyInfo = privateBody ? tsCollectPrivateBodyInfo(privateBody) : { bodyArgIdent: null, destructures: [] };
+
     const info: TsSignatureInfo = {
         requestTypeName: null,
         positionalParams: [],
         headerKeys: new Set(),
         passthroughBodyKey: null,
+        wholeParamIsBody: false,
     };
 
-    function visit(node: ts.Node) {
-        if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
-            if (node.name.text === methodName) {
-                classifyTsSignatureParams(node.parameters, source, info);
-            }
-            if (node.name.text === `__${methodName}` && node.body) {
-                tsCollectRequestBindings(node.body, info);
-            }
-        }
-        ts.forEachChild(node, visit);
+    classifyTsSignatureParams((publicMethod as ts.MethodDeclaration).parameters, source, info, bodyInfo);
+    for (const pattern of bodyInfo.destructures) {
+        classifyTsRequestDestructure(pattern, bodyInfo.bodyArgIdent, info);
     }
-    visit(sf);
     return info;
 }
 
+interface TsPrivateBodyInfo {
+    // Identifier passed to the fetcher's `body:` arg. Either a destructure
+    // local (`_body`) or the param itself (`request`).
+    bodyArgIdent: string | null;
+    // Every `const {...} = request` destructure in declaration order — we
+    // classify each one after the walk so we have `bodyArgIdent` first.
+    destructures: ts.ObjectBindingPattern[];
+}
+
 // Drop trailing `requestOptions?` then treat the last remaining param as
-// the request body (when its type ends in "Request"). All earlier params
-// are positional path/query args.
+// the request body when EITHER its type name ends in "Request" OR the
+// private __method forwards that param verbatim as the wire body
+// (`body: <paramName>`, no destructure). The latter case catches type-
+// alias bodies like `request: phenoml.agent.JsonPatch` where the name
+// suffix doesn't advertise it. All earlier params are positional
+// path/query args.
 function classifyTsSignatureParams(
     params: ts.NodeArray<ts.ParameterDeclaration>,
     source: string,
     out: TsSignatureInfo,
+    bodyInfo: TsPrivateBodyInfo,
 ) {
     const eligible = params.filter((p) => {
         const typeName = p.type ? tsTypeLastSegment(p.type, source) : null;
@@ -339,7 +462,11 @@ function classifyTsSignatureParams(
 
     const last = eligible[eligible.length - 1];
     const lastTypeName = last.type ? tsTypeLastSegment(last.type, source) : null;
-    const lastIsBody = lastTypeName !== null && /Request$/.test(lastTypeName);
+    const lastParamName = ts.isIdentifier(last.name) ? last.name.text : null;
+    const lastNameEndsInRequest = lastTypeName !== null && /Request$/.test(lastTypeName);
+    const lastIsPassthroughBody =
+        lastParamName !== null && bodyInfo.bodyArgIdent === lastParamName;
+    const lastIsBody = lastNameEndsInRequest || lastIsPassthroughBody;
 
     const positionalParams = lastIsBody ? eligible.slice(0, -1) : eligible;
     for (const p of positionalParams) {
@@ -347,7 +474,15 @@ function classifyTsSignatureParams(
         const typeText = p.type ? source.slice(p.type.pos, p.type.end).trim() : "string";
         out.positionalParams.push({ name: p.name.text, kind: tsInferParamKind(typeText) });
     }
-    if (lastIsBody) out.requestTypeName = lastTypeName;
+    if (lastIsBody) {
+        out.requestTypeName = lastTypeName;
+        // Mark whenever the param's full value IS the wire body (the private
+        // method forwards it without destructuring). The synthetic-passthrough
+        // fallback in buildTsRenderSchema only fires when the type ALSO fails
+        // to resolve to a parseable interface, so this stays a no-op for
+        // ordinary whole-object bodies like `request: CohortRequest`.
+        out.wholeParamIsBody = lastIsPassthroughBody;
+    }
 }
 
 // Path/query params are scalar; default to "string" when the type isn't
@@ -359,31 +494,29 @@ function tsInferParamKind(typeText: string): SchemaFieldKind {
     return "string";
 }
 
-// Walk a private __method body for two Fern patterns:
+// Walk a private __method body and gather the raw signals the signature
+// classifier and destructure classifier need:
 //
 //   const { "X-Header": id, ..._body } = request;
-//   ...
-//   body: _body,                       // fetcher arg
-//
-// → `id`'s wire key is a header, `_body` (and the rest of `request`) is
-// the wire body. This is the common case.
+//   body: _body,                       // → `_body` is the body identifier;
+//                                       //   `id` is a header.
 //
 //   const { "X-Header": id, body: _body } = request;
-//   ...
-//   body: _body,                       // fetcher arg
+//   body: _body,                       // → `id` is a header; the interface's
+//                                       //   `body` property's value IS the
+//                                       //   wire body (JSON Patch array on
+//                                       //   FHIR-style PATCH endpoints).
 //
-// → `id`'s wire key is a header, and the interface's `body` property's
-// value IS the wire body (e.g. a JSON Patch array on PATCH endpoints).
-// Mark that wire key as the passthrough body key.
+//   body: request,                     // (no destructure)
+//                                       // → the whole `request` param value
+//                                       //   IS the wire body. Flagged via
+//                                       //   `bodyArgIdent === paramName` in
+//                                       //   the signature classifier.
 //
 // Destructures without rest AND without a matching body arg (e.g. `const
-// { version } = request` for query params) are left alone — flagging
-// `version` as a header would drop it from the body schema entirely.
-function tsCollectRequestBindings(body: ts.Block, out: TsSignatureInfo) {
-    // Single AST pass: collect the fetcher's `body: <ident>` arg AND every
-    // `const {...} = request` destructure. We can't classify destructures
-    // until `bodyArgIdent` is known, so defer classification until after
-    // the walk.
+// { version } = request` for query params) are left alone by the caller —
+// flagging `version` as a header would drop it from the body schema entirely.
+function tsCollectPrivateBodyInfo(body: ts.Block): TsPrivateBodyInfo {
     let bodyArgIdent: string | null = null;
     const destructures: ts.ObjectBindingPattern[] = [];
     function visit(node: ts.Node) {
@@ -407,9 +540,7 @@ function tsCollectRequestBindings(body: ts.Block, out: TsSignatureInfo) {
         ts.forEachChild(node, visit);
     }
     visit(body);
-    for (const pattern of destructures) {
-        classifyTsRequestDestructure(pattern, bodyArgIdent, out);
-    }
+    return { bodyArgIdent, destructures };
 }
 
 function classifyTsRequestDestructure(
@@ -476,6 +607,21 @@ function tsTypeLastSegment(typeNode: ts.TypeNode, source: string): string | null
 export function tsResolveRequestInterfacePath(clientFile: string, requestTypeName: string): string | null {
     const requestsDir = path.join(path.dirname(clientFile), "requests");
     const candidate = path.join(requestsDir, requestTypeName + ".ts");
+    if (fs.existsSync(candidate)) return candidate;
+    return null;
+}
+
+// Locate the file declaring the request type — usually an interface in
+// `client/requests/<Name>.ts`, but Fern places discriminated unions and
+// type aliases under `<resource>/types/<Name>.ts` instead (e.g.
+// `FhirProviderAddAuthConfigRequest` is a union, `JsonPatch` is a type
+// alias). Try both layouts so the schema builder can still produce a
+// passthrough render for those.
+function tsResolveRequestTypePath(clientFile: string, requestTypeName: string): string | null {
+    const fromRequests = tsResolveRequestInterfacePath(clientFile, requestTypeName);
+    if (fromRequests) return fromRequests;
+    const typesDir = path.join(path.dirname(clientFile), "..", "types");
+    const candidate = path.join(typesDir, requestTypeName + ".ts");
     if (fs.existsSync(candidate)) return candidate;
     return null;
 }

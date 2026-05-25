@@ -198,6 +198,14 @@ Some endpoints' raw clients send a single sub-value as the wire payload instead 
 
 In each case, the schema field for that property carries `passthroughBody: true` so the consumer's renderer sources the value from `body` directly rather than `body[jsonKey]` — the latter fails when the wire body isn't an object (a JSON Patch array has no `body` / `request` property). The flag is absent on every other field, including ordinary body fields and path-param kwargs.
 
+**Synthetic passthrough body (TypeScript).** Some Fern signatures forward the trailing request param to the fetcher directly (`body: request`, no destructure) and declare its type as a top-level type alias rather than an interface — either an array alias (`type JsonPatch = JsonPatchOperation[]`) or a discriminated union (`type AddAuthConfigRequest = A | B | ...`). There is no field catalog to flatten into `body.fields`, so the parser emits a single synthetic field:
+
+- `jsonKey: ""`, `fieldTemplate: "{{value}}"`, `passthroughBody: true`
+- `kind: "list"` (with `items` resolved through the sibling `types/` directory) when the alias is an array
+- `kind: "object"` with no `nested` (the "untyped object fallback") for discriminated unions
+
+`callTemplate` skips the `{ {{__body__}} }` wrapping in this branch — the rendered body literal (`[...]` or `{...}`) supplies its own delimiters, so `client.agent.patch({{id}}, {{__body__}})` substitutes to `client.agent.patch("id", [{...}])` rather than `({ [...] })`.
+
 #### Schema completeness
 
 The `render.body.fields` catalog is **spec-full** — it lists every field the
