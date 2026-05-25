@@ -1787,7 +1787,9 @@ describe("Java parser (rich schema fixture)", () => {
         // sources the value from the wire body itself rather than
         // body["body"] (which would be undefined). The two @JsonIgnore
         // header fields are excluded from the schema as usual.
-        const patch = endpoints.find((e) => e.methodName === "patch")!;
+        const patch = endpoints.find(
+            (e) => e.methodName === "patch" && e.methodChain[0] === "fhir",
+        )!;
         expect(patch.javaBodyPassthroughField).toBe("body");
         const fields = patch.renderSchema?.body?.fields ?? [];
         expect(fields.map((f) => f.jsonKey)).toEqual(["body"]);
@@ -1797,6 +1799,63 @@ describe("Java parser (rich schema fixture)", () => {
             kind: "list",
             passthroughBody: true,
         });
+    });
+
+    test("synthesizes a passthrough list body for List<T>-typed request params", () => {
+        // `agent.patch(id, List<JsonPatchOperation>, ...)` — the trailing
+        // param is a top-level collection, not a `*Request` class. Before
+        // the fix, the classifier treated `request` as a positional string
+        // param and dropped the body from the manifest entirely. The
+        // callTemplate must skip the `.builder().build()` envelope (the
+        // user passes `Arrays.asList(...)` directly), and the synthetic
+        // list field's `items` must resolve to the JsonPatchOperation
+        // builder so per-element rendering still works.
+        const patch = endpoints.find(
+            (e) => e.methodName === "patch" && e.methodChain[0] === "agent",
+        )!;
+        expect(patch.renderSchema?.callTemplate).toBe(
+            "client.agent().patch({{id}}, {{__body__}})",
+        );
+        const fields = patch.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "list",
+            passthroughBody: true,
+        });
+        expect(fields[0].items?.kind).toBe("object");
+        const itemKeys = fields[0].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
+        expect(itemKeys).toEqual(["op", "path", "value"]);
+        expect(fields[0].items?.nested?.wrap).toBe(
+            "JsonPatchOperation.builder(){{__body__}}.build()",
+        );
+    });
+
+    test("synthesizes a passthrough object body for Jackson discriminated-union request types", () => {
+        // `addAuthConfig(id, FhirProviderAddAuthConfigRequest, ...)` — the
+        // request type ends in "Request" but is a Jackson union with no
+        // `builder()` (only static factories like `clientSecret(...)`).
+        // The existing builder path would emit
+        // `FhirProviderAddAuthConfigRequest.builder().value(...).build()`
+        // — broken Java since `.builder()` doesn't exist. The schema
+        // builder detects the union via `@JsonSubTypes` and emits a
+        // passthrough object field; the consumer falls through to the
+        // README's "untyped object" Java behavior (render the example
+        // body verbatim).
+        const ep = endpoints.find((e) => e.methodName === "addAuthConfig")!;
+        expect(ep.renderSchema?.callTemplate).toBe(
+            "client.agent().addAuthConfig({{fhir_provider_id}}, {{__body__}})",
+        );
+        const fields = ep.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "object",
+            passthroughBody: true,
+        });
+        expect(fields[0].nested).toBeUndefined();
     });
 });
 

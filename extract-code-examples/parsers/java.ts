@@ -454,18 +454,33 @@ export function buildJavaRenderSchema(
     let body: BodySchema | undefined;
 
     if (endpoint.javaRequestClass) {
-        const bodyExpr = `${endpoint.javaRequestClass}.builder(){{__body__}}.build()`;
-        callTemplate = `${chainStr}(${positionalStr ? `${positionalStr}, ${bodyExpr}` : bodyExpr})`;
+        const passthroughBody = buildJavaPassthroughBody(
+            endpoint.javaRequestClass,
+            rawClientFile,
+            classCache,
+        );
+        if (passthroughBody) {
+            // List/discriminated-union bodies don't ride a builder envelope —
+            // the call site is `client.x().method(p1, p2, BODY_LITERAL)` with
+            // the literal supplying its own delimiters (`Arrays.asList(...)`,
+            // or a user-supplied factory call).
+            const slot = positionalStr ? `${positionalStr}, {{__body__}}` : "{{__body__}}";
+            callTemplate = `${chainStr}(${slot})`;
+            body = passthroughBody;
+        } else {
+            const bodyExpr = `${endpoint.javaRequestClass}.builder(){{__body__}}.build()`;
+            callTemplate = `${chainStr}(${positionalStr ? `${positionalStr}, ${bodyExpr}` : bodyExpr})`;
 
-        const classFile = findJavaClassFile(rawClientFile, endpoint.javaRequestClass);
-        if (classFile) {
-            const classInfo = parseJavaClassCached(classFile, classCache);
-            if (classInfo) {
-                body = buildJavaBodySchema(classInfo, {
-                    headerJsonKeys: new Set(endpoint.javaHeaderJsonKeys ?? []),
-                    bodyJsonKeys: endpoint.javaBodyJsonKeys,
-                    passthroughField: endpoint.javaBodyPassthroughField,
-                });
+            const classFile = findJavaClassFile(rawClientFile, endpoint.javaRequestClass);
+            if (classFile) {
+                const classInfo = parseJavaClassCached(classFile, classCache);
+                if (classInfo) {
+                    body = buildJavaBodySchema(classInfo, {
+                        headerJsonKeys: new Set(endpoint.javaHeaderJsonKeys ?? []),
+                        bodyJsonKeys: endpoint.javaBodyJsonKeys,
+                        passthroughField: endpoint.javaBodyPassthroughField,
+                    });
+                }
             }
         }
     } else {
@@ -475,6 +490,108 @@ export function buildJavaRenderSchema(
     const schema: RenderSchema = { callTemplate, params };
     if (body) schema.body = body;
     return schema;
+}
+
+// Detect request types that can't ride Fern's standard staged-builder
+// envelope and produce a single-field passthrough BodySchema for the
+// consumer to render the example body verbatim. Returns null when the
+// request type is a regular Fern request class (caller falls through to
+// the existing builder path). Two shapes qualify:
+//
+//   1. `List<JsonPatchOperation>` (or Set/Collection/Iterable) — the
+//      param IS the wire body, rendered as `Arrays.asList(...)`. The
+//      item type is resolved through the raw-client's imports so nested
+//      item builders still render correctly.
+//
+//   2. Jackson discriminated unions (`@JsonSubTypes` in the class file).
+//      Fern emits no `builder()` on these — only static factory methods
+//      like `clientSecret(...)`. We don't try to reconstruct the right
+//      factory call from the example body; instead we emit `kind:
+//      "object"` with no `nested`, which the README documents as
+//      "untyped-object fallback (consumer falls back to the example
+//      body verbatim)". Strictly better than emitting broken
+//      `Request.builder().value(...).build()`.
+function buildJavaPassthroughBody(
+    requestClass: string,
+    rawClientFile: string,
+    classCache?: Map<string, JavaClassInfo | null>,
+): BodySchema | null {
+    const listMatch = requestClass.match(/^(?:List|Set|Collection|Iterable)\s*<\s*(.+)\s*>\s*$/);
+    if (listMatch) {
+        return {
+            fieldSeparator: "",
+            fields: [{
+                jsonKey: "",
+                fieldTemplate: "{{value}}",
+                kind: "list",
+                required: true,
+                items: javaResolveListItemField(listMatch[1].trim(), rawClientFile, classCache),
+                passthroughBody: true,
+            }],
+        };
+    }
+    const classFile = findJavaClassFile(rawClientFile, requestClass);
+    if (classFile && javaIsDiscriminatedUnion(classFile)) {
+        return {
+            fieldSeparator: "",
+            fields: [{
+                jsonKey: "",
+                fieldTemplate: "{{value}}",
+                kind: "object",
+                required: true,
+                passthroughBody: true,
+            }],
+        };
+    }
+    return null;
+}
+
+// Build the synthetic `items` SchemaField for a Java collection-typed
+// body. Resolves the item type (e.g. `JsonPatchOperation`) through the
+// raw client's imports so a downstream renderer can recurse into the
+// item's builder. Falls back to an untyped object item when the type
+// isn't a class we can read.
+function javaResolveListItemField(
+    itemType: string,
+    rawClientFile: string,
+    classCache?: Map<string, JavaClassInfo | null>,
+): import("../types").SchemaField {
+    const simple = itemType.replace(/<.*$/, "").trim();
+    const primitive = JAVA_PRIMITIVE_KIND[simple];
+    if (primitive) {
+        return { jsonKey: "", fieldTemplate: "{{value}}", kind: primitive, required: true };
+    }
+    const classFile = findJavaClassFile(rawClientFile, simple);
+    if (!classFile) {
+        return { jsonKey: "", fieldTemplate: "{{value}}", kind: "object", required: true };
+    }
+    const classInfo = parseJavaClassCached(classFile, classCache);
+    if (!classInfo) {
+        return { jsonKey: "", fieldTemplate: "{{value}}", kind: "object", required: true };
+    }
+    if (classInfo.enumConstants) {
+        const item: import("../types").SchemaField = {
+            jsonKey: "", fieldTemplate: "{{value}}", kind: "enum", required: true,
+            enumValues: classInfo.enumConstants.map((c) => c.wireValue),
+            enumConstants: Object.fromEntries(
+                classInfo.enumConstants.map((c) => [c.wireValue, `${classInfo.className}.${c.constantName}`]),
+            ),
+        };
+        return item;
+    }
+    const nested = buildJavaBodySchema(classInfo);
+    nested.wrap = `${classInfo.className}.builder(){{__body__}}.build()`;
+    return { jsonKey: "", fieldTemplate: "{{value}}", kind: "object", required: true, nested };
+}
+
+// Fern emits Jackson discriminated unions for OpenAPI `oneOf` request
+// bodies. The outer class has no `builder()` and a private `Value`
+// field; the inner `Value` interface carries `@JsonSubTypes`. Either
+// signal is sufficient — we use `@JsonSubTypes` because it lives in the
+// outer file even when the inner Value class is nested.
+function javaIsDiscriminatedUnion(classFile: string): boolean {
+    const source = fs.readFileSync(classFile, "utf-8");
+    return /@JsonSubTypes\s*\(/.test(source);
 }
 
 function parseJavaClassCached(
@@ -541,8 +658,12 @@ function javaScanBodyStatement(
 
 // Classify Fern-generated signature params. The Fern Java codegen places
 // path/query params first, the request body last (immediately before any
-// trailing RequestOptions), and uses the type's "Request" suffix to mark
-// body params unambiguously.
+// trailing RequestOptions). The body param is recognized via EITHER its
+// `*Request` type suffix (e.g. CohortRequest, AgentChatRequest — the
+// dominant pattern) OR a top-level collection type (e.g.
+// `List<JsonPatchOperation>` for JSON Patch endpoints whose wire body is
+// an array). Without the collection-type case, JSON Patch params get
+// misclassified as positional and the body drops out of the manifest.
 export function javaClassifySignatureParams(params: SignatureParam[]): {
     requestClass: string | null;
     bodyParamName: string | null;
@@ -553,12 +674,10 @@ export function javaClassifySignatureParams(params: SignatureParam[]): {
     if (filtered.length === 0) {
         return { requestClass: null, bodyParamName: null, positional: [] };
     }
-    // The Fern convention names the body type with a "Request" suffix
-    // (e.g. CohortRequest, AgentChatRequest). When the last param ends in
-    // "Request", treat it as the body; otherwise this endpoint has no body
-    // (e.g. GETs with only path params).
     const last = filtered[filtered.length - 1];
-    const isBody = /Request$/.test(last.type) || last.type.includes(".Request");
+    const isRequestClass = /Request$/.test(last.type) || last.type.includes(".Request");
+    const isCollectionBody = /^(List|Set|Collection|Iterable)\s*</.test(last.type);
+    const isBody = isRequestClass || isCollectionBody;
     if (!isBody) {
         return {
             requestClass: null,
