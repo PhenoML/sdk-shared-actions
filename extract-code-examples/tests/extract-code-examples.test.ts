@@ -945,13 +945,16 @@ describe("TypeScript parser (Summary client fixture)", () => {
     const endpoints = parser.parseEndpoints(root);
     const examples = parser.parseTestExamples(root);
 
-    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming/chat/get endpoints and fhir patch", () => {
+    test("parseEndpoints extracts all 6 Summary endpoints plus the agent streaming/chat/get/patch/addAuthConfig endpoints and fhir patch", () => {
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /fhir2summary/template/{id}",
             "GET /agent/{agent_id}",
             "GET /fhir2summary/template/{id}",
             "GET /fhir2summary/templates",
+            "PATCH /agent/{id}",
+            "PATCH /agent/{id}/add-auth-config",
+            "PATCH /agent/{id}/raw",
             "PATCH /fhir-provider/{fhir_provider_id}/fhir/{fhir_path}",
             "POST /agent/chat",
             "POST /agent/stream-chat",
@@ -1136,7 +1139,9 @@ describe("TypeScript parser (Summary client fixture)", () => {
         // the consumer's `body["body"]` lookup would miss it entirely,
         // and the no-rest destructure pattern would leak the X-headers
         // into `body.fields`.
-        const patch = endpoints.find((e) => e.methodName === "patch")!;
+        const patch = endpoints.find(
+            (e) => e.methodName === "patch" && e.methodChain[0] === "fhir",
+        )!;
         const fields = patch.renderSchema?.body?.fields ?? [];
         const keys = fields.map((f) => f.jsonKey);
         expect(keys).toContain("body");
@@ -1148,6 +1153,88 @@ describe("TypeScript parser (Summary client fixture)", () => {
             kind: "list",
             passthroughBody: true,
         });
+    });
+
+    test("renderSchema synthesizes a passthrough list body for type-alias PATCH endpoints", () => {
+        // `agent.patch(id, request: JsonPatch)` — JsonPatch is a top-level
+        // type alias (`type JsonPatch = JsonPatchOperation[]`), not an
+        // interface. Without alias handling the parser would treat
+        // `request` as a positional string param and drop the patch body
+        // from the generated SDK snippet (the original bug fix target).
+        // The call template must NOT wrap with `{ }` — the rendered body
+        // is a self-delimiting array literal.
+        const patch = endpoints.find(
+            (e) => e.methodName === "patch" && e.methodChain[0] === "agent",
+        )!;
+        expect(patch.renderSchema?.callTemplate).toBe(
+            "client.agent.patch({{id}}, {{__body__}})",
+        );
+        expect(patch.renderSchema?.params).toEqual([{ name: "id", kind: "string" }]);
+        const fields = patch.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "list",
+            passthroughBody: true,
+        });
+        // Items resolve through the types/ fallback so per-element fields
+        // render as typed object literals, not raw JSON.
+        expect(fields[0].items?.kind).toBe("object");
+        const itemKeys = fields[0].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
+        expect(itemKeys).toEqual(["op", "path", "value", "from"]);
+    });
+
+    test("renderSchema synthesizes a passthrough list body when the trailing param's type is an inline array", () => {
+        // `patchRaw(id, request: JsonPatchOperation[])` — inline `T[]`
+        // syntax produces an ArrayTypeNode that tsTypeLastSegment can't
+        // name (the trailing `]` defeats the rightmost-identifier
+        // regex). Without the inline-array fallback the body would
+        // silently drop: `requestTypeName` is null even though the
+        // private method does `body: request`. The fix uses the raw
+        // type text to recover `kind: "list"` with resolved items.
+        const ep = endpoints.find((e) => e.methodName === "patchRaw")!;
+        expect(ep.renderSchema?.callTemplate).toBe(
+            "client.agent.patchRaw({{id}}, {{__body__}})",
+        );
+        const fields = ep.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "list",
+            passthroughBody: true,
+        });
+        // Items resolve through the same types/ fallback the named-alias
+        // path uses, so per-element JsonPatchOperation fields render
+        // typed (not raw JSON).
+        expect(fields[0].items?.kind).toBe("object");
+        const itemKeys = fields[0].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
+        expect(itemKeys).toEqual(["op", "path", "value", "from"]);
+    });
+
+    test("renderSchema synthesizes a passthrough object body for discriminated-union *Request types in types/", () => {
+        // `agent.addAuthConfig(id, request: AgentAddAuthConfigRequest)` —
+        // the request type lives at types/AgentAddAuthConfigRequest.ts as
+        // a discriminated union. Before the fix, the resolver only looked
+        // in requests/ and emitted a callTemplate referencing
+        // `{ {{__body__}} }` with no body fields — the consumer would
+        // render an empty `{ }` as the second argument.
+        const ep = endpoints.find((e) => e.methodName === "addAuthConfig")!;
+        expect(ep.renderSchema?.callTemplate).toBe(
+            "client.agent.addAuthConfig({{id}}, {{__body__}})",
+        );
+        const fields = ep.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "object",
+            passthroughBody: true,
+        });
+        // No `nested` — the consumer's untyped-object fallback renders the
+        // example body verbatim as a TS object literal.
+        expect(fields[0].nested).toBeUndefined();
     });
 });
 
@@ -1729,7 +1816,9 @@ describe("Java parser (rich schema fixture)", () => {
         // sources the value from the wire body itself rather than
         // body["body"] (which would be undefined). The two @JsonIgnore
         // header fields are excluded from the schema as usual.
-        const patch = endpoints.find((e) => e.methodName === "patch")!;
+        const patch = endpoints.find(
+            (e) => e.methodName === "patch" && e.methodChain[0] === "fhir",
+        )!;
         expect(patch.javaBodyPassthroughField).toBe("body");
         const fields = patch.renderSchema?.body?.fields ?? [];
         expect(fields.map((f) => f.jsonKey)).toEqual(["body"]);
@@ -1739,6 +1828,63 @@ describe("Java parser (rich schema fixture)", () => {
             kind: "list",
             passthroughBody: true,
         });
+    });
+
+    test("synthesizes a passthrough list body for List<T>-typed request params", () => {
+        // `agent.patch(id, List<JsonPatchOperation>, ...)` — the trailing
+        // param is a top-level collection, not a `*Request` class. Before
+        // the fix, the classifier treated `request` as a positional string
+        // param and dropped the body from the manifest entirely. The
+        // callTemplate must skip the `.builder().build()` envelope (the
+        // user passes `Arrays.asList(...)` directly), and the synthetic
+        // list field's `items` must resolve to the JsonPatchOperation
+        // builder so per-element rendering still works.
+        const patch = endpoints.find(
+            (e) => e.methodName === "patch" && e.methodChain[0] === "agent",
+        )!;
+        expect(patch.renderSchema?.callTemplate).toBe(
+            "client.agent().patch({{id}}, {{__body__}})",
+        );
+        const fields = patch.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "list",
+            passthroughBody: true,
+        });
+        expect(fields[0].items?.kind).toBe("object");
+        const itemKeys = fields[0].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
+        expect(itemKeys).toEqual(["op", "path", "value"]);
+        expect(fields[0].items?.nested?.wrap).toBe(
+            "JsonPatchOperation.builder(){{__body__}}.build()",
+        );
+    });
+
+    test("synthesizes a passthrough object body for Jackson discriminated-union request types", () => {
+        // `addAuthConfig(id, FhirProviderAddAuthConfigRequest, ...)` — the
+        // request type ends in "Request" but is a Jackson union with no
+        // `builder()` (only static factories like `clientSecret(...)`).
+        // The existing builder path would emit
+        // `FhirProviderAddAuthConfigRequest.builder().value(...).build()`
+        // — broken Java since `.builder()` doesn't exist. The schema
+        // builder detects the union via `@JsonSubTypes` and emits a
+        // passthrough object field; the consumer falls through to the
+        // README's "untyped object" Java behavior (render the example
+        // body verbatim).
+        const ep = endpoints.find((e) => e.methodName === "addAuthConfig")!;
+        expect(ep.renderSchema?.callTemplate).toBe(
+            "client.agent().addAuthConfig({{fhir_provider_id}}, {{__body__}})",
+        );
+        const fields = ep.renderSchema?.body?.fields ?? [];
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({
+            jsonKey: "",
+            fieldTemplate: "{{value}}",
+            kind: "object",
+            passthroughBody: true,
+        });
+        expect(fields[0].nested).toBeUndefined();
     });
 });
 

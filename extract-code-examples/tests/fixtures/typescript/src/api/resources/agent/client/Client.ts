@@ -121,4 +121,85 @@ export class AgentClient {
         if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
         return handleNonStatusCodeError(_response.error, _response.rawResponse, "POST", "/agent/chat");
     }
+
+    // The trailing param's type is a top-level type alias (`JsonPatch =
+    // JsonPatchOperation[]`) — the name doesn't end in "Request" and the
+    // value isn't an object, so the user-facing call passes the array
+    // directly (no `{ ... }` wrapper). The wire body IS the entire param.
+    public patch(
+        id: string,
+        request: phenoml.agent.JsonPatch,
+        requestOptions?: AgentClient.RequestOptions,
+    ): core.HttpResponsePromise<unknown> {
+        return core.HttpResponsePromise.fromPromise(this.__patch(id, request, requestOptions));
+    }
+
+    private async __patch(
+        id: string,
+        request: phenoml.agent.JsonPatch,
+        requestOptions?: AgentClient.RequestOptions,
+    ): Promise<core.WithRawResponse<unknown>> {
+        const _response = await (this._options.fetcher ?? core.fetcher)({
+            url: `https://example/agent/${id}`,
+            method: "PATCH",
+            body: request,
+        });
+        if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
+        return handleNonStatusCodeError(_response.error, _response.rawResponse, "PATCH", "/agent/{id}");
+    }
+
+    // The request type ends in "Request" but lives under types/ as a
+    // discriminated union (auth_method as the wire discriminator).
+    // tsParseRequestInterface bails on the file; the schema builder falls
+    // back to a synthetic passthrough body field so the consumer renders
+    // the object literal verbatim.
+    public addAuthConfig(
+        id: string,
+        request: phenoml.agent.AgentAddAuthConfigRequest,
+        requestOptions?: AgentClient.RequestOptions,
+    ): core.HttpResponsePromise<unknown> {
+        return core.HttpResponsePromise.fromPromise(this.__addAuthConfig(id, request, requestOptions));
+    }
+
+    private async __addAuthConfig(
+        id: string,
+        request: phenoml.agent.AgentAddAuthConfigRequest,
+        requestOptions?: AgentClient.RequestOptions,
+    ): Promise<core.WithRawResponse<unknown>> {
+        const _response = await (this._options.fetcher ?? core.fetcher)({
+            url: `https://example/agent/${id}/add-auth-config`,
+            method: "PATCH",
+            body: request,
+        });
+        if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
+        return handleNonStatusCodeError(_response.error, _response.rawResponse, "PATCH", "/agent/{id}/add-auth-config");
+    }
+
+    // Anonymous inline array request type. Fern usually emits a named
+    // alias (`phenoml.agent.JsonPatch`), but a defensive guard covers
+    // signatures whose trailing param is declared inline as `T[]` — no
+    // resolvable type name, so tsTypeLastSegment returns null. Without
+    // the inline-array path, the body would silently drop because
+    // `requestTypeName` is null even though the param IS the body.
+    public patchRaw(
+        id: string,
+        request: phenoml.agent.JsonPatchOperation[],
+        requestOptions?: AgentClient.RequestOptions,
+    ): core.HttpResponsePromise<unknown> {
+        return core.HttpResponsePromise.fromPromise(this.__patchRaw(id, request, requestOptions));
+    }
+
+    private async __patchRaw(
+        id: string,
+        request: phenoml.agent.JsonPatchOperation[],
+        requestOptions?: AgentClient.RequestOptions,
+    ): Promise<core.WithRawResponse<unknown>> {
+        const _response = await (this._options.fetcher ?? core.fetcher)({
+            url: `https://example/agent/${id}/raw`,
+            method: "PATCH",
+            body: request,
+        });
+        if (_response.ok) return { data: _response.body, rawResponse: _response.rawResponse };
+        return handleNonStatusCodeError(_response.error, _response.rawResponse, "PATCH", "/agent/{id}/raw");
+    }
 }
