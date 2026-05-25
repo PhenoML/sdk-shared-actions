@@ -193,7 +193,7 @@ Every key in `renderRules` is required so the consumer's `renderValue` algorithm
 Some endpoints' raw clients send a single sub-value as the wire payload instead of the whole request object. PATCH endpoints whose body is a top-level JSON Patch array are the common case:
 
 - **Python**: `json=convert_and_respect_annotation_metadata(object_=request, ...)` or bare `json=<kwarg>` — the kwarg's value IS the wire body.
-- **TypeScript**: `const { ...headers, body: _body } = request; ... body: _body` — the `body` interface property's value IS the wire body. (Headers destructured alongside without a `...rest` binding are still recognized and excluded from the body schema.)
+- **TypeScript**: `const { "X-Header": header, body: _body } = request; ... body: _body` — the `body` interface property's value IS the wire body. (Headers destructured alongside without a `...rest` binding are still recognized and excluded from the body schema.)
 - **Java**: `RequestBody.create(writeValueAsBytes(request.getBody()), ...)` — only `request.getBody()` ships; the rest of the request class is read for headers (via `addHeader(...)`) or unused.
 
 In each case, the schema field for that property carries `passthroughBody: true` so the consumer's renderer sources the value from `body` directly rather than `body[jsonKey]` — the latter fails when the wire body isn't an object (a JSON Patch array has no `body` / `request` property). The flag is absent on every other field, including ordinary body fields and path-param kwargs.
