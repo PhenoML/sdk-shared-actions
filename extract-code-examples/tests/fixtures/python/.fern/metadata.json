@@ -1,8 +1,5 @@
 {
-    "cliVersion": "test",
-    "generatorName": "fernapi/fern-python-sdk",
-    "generatorVersion": "test",
-    "generatorConfig": {},
-    "originGitCommit": "deadbeef",
-    "sdkVersion": "0.0.0-test"
+  "generatorName": "fernapi/fern-python-sdk",
+  "sdkVersion": "0.0.0",
+  "originGitCommit": "fixture-abc123"
 }

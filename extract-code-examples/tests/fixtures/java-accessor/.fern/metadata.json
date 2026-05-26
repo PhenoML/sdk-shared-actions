@@ -1,8 +1,0 @@
-{
-    "cliVersion": "test",
-    "generatorName": "fernapi/fern-java-sdk",
-    "generatorVersion": "test",
-    "generatorConfig": {},
-    "originGitCommit": "deadbeef",
-    "sdkVersion": "0.0.0-test"
-}

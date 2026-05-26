@@ -1,5 +1,5 @@
 {
-    "name": "phenoml-ts-sdk-fixture",
-    "version": "0.0.0-test",
-    "private": true
+  "name": "phenoml",
+  "version": "0.0.0",
+  "private": true
 }

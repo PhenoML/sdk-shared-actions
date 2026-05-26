@@ -1,3 +1,5 @@
-[project]
-name = "phenoml-fixture"
-version = "0.0.0-test"
+[tool.poetry]
+name = "phenoml"
+version = "0.0.0"
+description = "fixture"
+authors = []

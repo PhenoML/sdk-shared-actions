@@ -9,6 +9,12 @@ inputs:
     description: Root directory of the SDK repo to parse.
     required: false
     default: ${{ github.workspace }}
+  spec:
+    description: >-
+      Path to the bundled OpenAPI spec. Defaults to a per-language convention
+      under the SDK root (see bundle-openapi-spec). Pass this only to override.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -25,8 +31,12 @@ runs:
       shell: bash
       env:
         ROOT: ${{ inputs.root }}
+        SPEC: ${{ inputs.spec }}
         ACTION_PATH: ${{ github.action_path }}
-      run: bun run "$ACTION_PATH/index.ts" --root "$ROOT"
+      run: |
+        args=(--root "$ROOT")
+        if [ -n "$SPEC" ]; then args+=(--spec "$SPEC"); fi
+        bun run "$ACTION_PATH/index.ts" "${args[@]}"
 
     - name: Commit code-examples.json if changed
       shell: bash

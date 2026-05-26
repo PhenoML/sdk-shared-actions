@@ -1,15 +1,38 @@
 # extract-code-examples
 
-Parses a Fern-generated SDK (TypeScript, Python, or Java) and writes a
-`code-examples.json` manifest mapping `HTTP_METHOD path` keys to SDK call
-sources, request bodies, and response bodies. The SDK language is
-auto-detected from `.fern/metadata.json`.
+Reads a Fern-generated SDK's bundled OpenAPI spec (`openapi.json`) and the
+SDK source itself, then writes a `code-examples.json` manifest mapping
+`HTTP_METHOD path` keys to per-endpoint request/response examples plus a
+dynamic-render schema for the SDK call. Supports TypeScript, Python, and
+Java. The language is auto-detected from `.fern/metadata.json` when
+present (and overridable via `--language`).
+
+## Architecture
+
+The action pulls each piece of information from the source that's
+authoritative for it:
+
+- **Schemas, request/response examples, path/query parameters,
+  streaming flag** — from `openapi.json` (committed alongside the SDK by
+  the [`bundle-openapi-spec`](../bundle-openapi-spec) action).
+- **SDK method chain, method name, Java request-class name** — from the
+  generated SDK source (per-language parsers under `parsers/`).
+
+The two halves are joined by `(HTTP method, path)` and rendered through
+language-specific templates in `render-rules.ts`.
 
 ## Inputs
 
-| Name   | Default                | Description                              |
-|--------|------------------------|------------------------------------------|
-| `root` | `${{ github.workspace }}` | Root directory of the SDK repo to parse |
+| Name   | Default                                | Description                                                                  |
+|--------|----------------------------------------|------------------------------------------------------------------------------|
+| `root` | `${{ github.workspace }}`              | Root directory of the SDK repo to parse.                                     |
+| `spec` | (per-language convention under `root`) | Path to the bundled `openapi.json`. Pass to override the default location.   |
+
+Default spec paths (matching [`bundle-openapi-spec`](../bundle-openapi-spec)):
+
+- Python: `src/{pkg}/openapi/openapi.json`
+- Java: `src/main/resources/openapi/openapi.json`
+- TypeScript: `openapi/openapi.json`
 
 ## Usage
 
@@ -40,41 +63,35 @@ with `contents: write` permission.
 
 ## Manifest schema
 
-The output `code-examples.json` has shape:
-
 ```jsonc
 {
   "metadata": { "language": "java", "packageName": "...", "sdkVersion": "...", "specCommit": "...", "generatorName": "..." },
   "renderRules": { /* language-wide render constants — see below */ },
   "examples": {
-    "POST /tools/cohort": {
+    "POST /agent/create": {
       "httpMethod": "POST",
-      "httpPath": "/tools/cohort",
-      "request": { "body": { /* wire JSON — also the merge base for renderCall */ } },
-      "response": { "body": { /* wire JSON */ }, "streaming": false },
+      "httpPath": "/agent/create",
+      "request": { "body": { /* spec example — also the merge base for renderCall */ } },
+      "response": { "body": { /* spec example */ }, "streaming": false },
       "render": { /* dynamic render schema — see below */ }
     }
   }
 }
 ```
 
-The SDK method chain, method name, and call args that used to be on each
-example are all derivable from `render` and have been removed; recompose
-them by running `renderCall(example, example.request.body, {})` if a
-human-readable form is needed.
+The SDK method chain, method name, and call args used to live on each
+example; they're all derivable from `render` and have been removed.
+Recompose them by running `renderCall(example, example.request.body, {})`
+if a human-readable form is needed.
 
 ### Streaming endpoints
 
-`response.streaming === true` marks SSE / streaming endpoints (Fern's
-`Iterable<...>` return on Java, `httpx_client.stream(...)` on Python,
-`core.Stream<...>` on TS). When set, `response.body` is **always
-`null`** — the manifest does NOT carry an example event chunk,
-accumulated result, or union of chunk shapes. Wire tests for these
-endpoints enqueue a placeholder body Fern emits that the SDK's streaming
-path never parses, so surfacing it would be misleading. Consumers
-rendering a streaming example UI should treat `streaming: true` as the
-signal to switch presentation (e.g. show an "event stream" badge) and
-fall back to a generic streaming-response illustration if they want one.
+`response.streaming === true` marks SSE / streaming endpoints, detected
+from the spec's `text/event-stream` response content type. When set,
+`response.body` is **always `null`** — the manifest does NOT carry an
+example event chunk or accumulated result. Consumers rendering a
+streaming example UI should treat `streaming: true` as the signal to
+switch presentation (e.g. show an "event stream" badge).
 
 ### Dynamic rendering
 
@@ -86,9 +103,8 @@ language-agnostic algorithm. The algorithm is ~30 lines:
 function renderCall(example, body, pathParams):
   // Render the body fields the user supplied, ordered by the schema.
   // `passthroughBody`: the field's value is the entire `body`, not
-  // `body[jsonKey]` — used by all three languages for PATCH endpoints
-  // whose wire body is a top-level JSON Patch array rather than an
-  // object. See "Passthrough body fields" below.
+  // `body[jsonKey]` — used for endpoints whose wire body is a top-level
+  // JSON Patch array rather than an object.
   bodyStr = example.render.body
     ? example.render.body.fields
         .filter(f => f.passthroughBody || f.jsonKey in body)
@@ -99,7 +115,7 @@ function renderCall(example, body, pathParams):
         .join(example.render.body.fieldSeparator)
     : ""
 
-  // Substitute path/query params (positional) into their {{name}} placeholders.
+  // Substitute path/query params into their {{name}} placeholders.
   result = example.render.callTemplate
   for each p in example.render.params:
     result = result.replace("{{" + p.name + "}}", renderValue(pathParams[p.name], p))
@@ -133,37 +149,28 @@ function renderValue(value, field):
     // Fall back to language-native object rendering — see "Untyped object fallback" below
 ```
 
-**Merge with the example body before rendering.** The algorithm above renders only the fields present in `body`; unspecified fields are omitted entirely. Consumers usually want "static example as base, override these keys" semantics — deep-merge the user's overrides into `example.request.body` before calling `renderCall`. Without the merge, naive consumers will produce calls missing required fields and may mistakenly think the schema is incomplete.
+**Merge with the example body before rendering.** The algorithm above renders only the fields present in `body`; unspecified fields are omitted entirely. Consumers usually want "static example as base, override these keys" semantics — deep-merge the user's overrides into `example.request.body` before calling `renderCall`. Without the merge, naive consumers will produce calls missing required fields.
 
 #### `RenderSchema` fields
 
-- `callTemplate` — call wrapper string containing `{{name}}` placeholders for path/query params and a `{{__body__}}` placeholder (omitted when there is no body).
-- `params` — ordered list of path/query params (`{ name, kind, enumValues? }`). Each entry corresponds to a `{{name}}` placeholder in `callTemplate`. `kind` uses the same `SchemaFieldKind` union as body fields, so an enum-typed path param can surface its allowed values via `enumValues` (today Fern emits scalar path args; the wider type future-proofs the schema).
-- `body` — optional `{ fields, fieldSeparator, wrap? }`. Fields are ordered (required first); each carries a `fieldTemplate` with a `{{value}}` placeholder. The top-level body has no `wrap` (its envelope is in `callTemplate`); nested bodies (under a field's `nested` slot) carry `wrap` containing a `{{__body__}}` placeholder — Java emits `Tag.builder(){{__body__}}.build()`, TS emits `{ {{__body__}} }`.
+- `callTemplate` — call wrapper string containing `{{name}}` placeholders for path params and a `{{__body__}}` placeholder (omitted when there is no body).
+- `params` — ordered list of path params (`{ name, kind, enumValues? }`). Each entry corresponds to a `{{name}}` placeholder in `callTemplate`. `kind` uses the same `SchemaFieldKind` union as body fields.
+- `body` — optional `{ fields, fieldSeparator, wrap? }`. Fields are ordered (required first, then optional in spec declaration order). Each carries a `fieldTemplate` with a `{{value}}` placeholder. The top-level body has no `wrap` (its envelope is in `callTemplate`); nested bodies (under a field's `nested` slot) carry `wrap` containing a `{{__body__}}` placeholder — Java emits `Tag.builder(){{__body__}}.build()`.
+
+Query parameters are folded into `body.fields` so the consumer renders them as kwargs alongside body fields. They keep their natural `required: false` flag when the spec marks them optional.
 
 #### `SchemaField` (and `ParamField`) kinds
 
-Every entry — body field or path/query param — carries `kind` and `required`. The `required` flag is always present; it tells the consumer whether the field can be safely omitted (Java staged builders enforce this; TS/Python report it for fidelity). Path params are always required (the URL template can't be satisfied without them).
-
-| `kind`    | extra fields            | rendering                                                                 |
-|-----------|-------------------------|---------------------------------------------------------------------------|
-| `string`  | —                       | Substitute the (JSON-escaped) string into `renderRules.stringLiteral`     |
-| `number`  | —                       | Substitute the numeric text into `renderRules.numberLiteral`              |
-| `boolean` | —                       | Use `renderRules.trueLiteral` / `falseLiteral`                            |
+| `kind`    | extra fields                                              | rendering                                                                 |
+|-----------|-----------------------------------------------------------|---------------------------------------------------------------------------|
+| `string`  | —                                                         | Substitute the (JSON-escaped) string into `renderRules.stringLiteral`     |
+| `number`  | —                                                         | Substitute the numeric text into `renderRules.numberLiteral`              |
+| `boolean` | —                                                         | Use `renderRules.trueLiteral` / `falseLiteral`                            |
 | `enum`    | `enumValues: string[]`, `enumConstants?: Record<wire, expr>` | When `enumConstants[value]` is set, emit that expression verbatim (e.g. `AgentRole.ASSISTANT`); otherwise fall back to `string` rendering. Always surface `enumValues` to UI for dropdowns |
-| `list`    | `items: SchemaField`    | Render each element via `items`, join with `listSeparator`, wrap via `listLiteral` |
-| `object`  | `nested?: BodySchema`   | Recurse into `nested` if present; see "Untyped object fallback" below     |
-
-#### Untyped object fallback
-
-When `kind === "object"` and `nested` is absent, the SDK type couldn't be resolved. Behavior:
-
-- **TS / Python**: render as a language-native JSON object literal — `{ key: value, ... }` for TS, `{"key": value, ...}` for Python. Both languages accept this in places where the type would have specified a typed object.
-- **Java**: undefined. Java's typed builders don't accept JSON-object literals; in practice `nested` is always populated for fields the schema knows about, so this case shouldn't occur on a well-formed manifest. Consumers should treat an unresolved Java `object` field as a schema-extraction gap and either skip the field or fall back to the example's `request.body` value verbatim.
+| `list`    | `items: SchemaField`                                      | Render each element via `items`, join with `listSeparator`, wrap via `listLiteral` |
+| `object`  | `nested?: BodySchema`                                     | Recurse into `nested` if present; otherwise emit a language-native JSON object literal |
 
 #### `renderRules` reference
-
-Every key in `renderRules` is required so the consumer's `renderValue` algorithm runs without nil checks.
 
 | Key             | TypeScript      | Python           | Java                          |
 |-----------------|-----------------|------------------|-------------------------------|
@@ -175,71 +182,51 @@ Every key in `renderRules` is required so the consumer's `renderValue` algorithm
 | `listLiteral`   | `[{{items}}]`   | `[{{items}}]`    | `Arrays.asList({{items}})`    |
 | `listSeparator` | `", "`          | `", "`           | `", "`                        |
 
-`{{value}}` is replaced with the rendered child literal; `{{items}}` is replaced with the list elements pre-joined by `listSeparator`.
-
-**String escaping**: the consumer is responsible for escaping the string's interior before substituting into `stringLiteral`. JSON escaping (`\n`, `\t`, `\"`, `\\`, `\uXXXX`) is a safe lowest common denominator across all three languages — Java string literals accept the same escape sequences as JSON. The `stringLiteral` template supplies the surrounding quotes.
+**String escaping**: the consumer is responsible for escaping the string's interior before substituting into `stringLiteral`. JSON escaping (`\n`, `\t`, `\"`, `\\`, `\uXXXX`) is a safe lowest common denominator across all three languages. The `stringLiteral` template supplies the surrounding quotes.
 
 #### Language differences encoded in the per-example schema
 
-| Construct           | TypeScript                                | Python                     | Java                                |
-|---------------------|-------------------------------------------|----------------------------|-------------------------------------|
-| Call wrapper        | `client.x.method({{path_param}}, { {{__body__}} })` | `client.x.method({{__body__}})` | `client.x().method({{path_param}}, RequestClass.builder(){{__body__}}.build())` |
-| `fieldSeparator`    | `", "`                                    | `", "`                     | `""` (each field begins with `.`)   |
-| `fieldTemplate`     | `"key": {{value}}`                        | `key={{value}}`            | `.setter({{value}})`                |
-| Path params         | `params[]` (positional, before body)      | inside body schema (kwargs) | `params[]` (positional, before body) |
+| Construct           | TypeScript                                | Python                          | Java                                |
+|---------------------|-------------------------------------------|---------------------------------|-------------------------------------|
+| Call wrapper        | `client.x.method({{id}}, { {{__body__}} })` | `client.x.method(id={{id}}, {{__body__}})` | `client.x().method({{id}}, ReqClass.builder(){{__body__}}.build())` |
+| `fieldSeparator`    | `", "`                                    | `", "`                          | `""` (each field begins with `.`)   |
+| `fieldTemplate`     | `"key": {{value}}`                        | `key={{value}}`                 | `.setter({{value}})`                |
+| Path params         | `params[]` (positional)                   | `params[]` (kwarg in callTemplate) | `params[]` (positional)         |
 
 #### Passthrough body fields
 
-Some endpoints' raw clients send a single sub-value as the wire payload instead of the whole request object. PATCH endpoints whose body is a top-level JSON Patch array are the common case:
+Some endpoints' wire body is a non-object value (a top-level JSON Patch
+array, for example). The schema field for the body carries
+`passthroughBody: true` so the consumer's renderer sources the value
+from `body` directly rather than `body[jsonKey]`. The flag is absent on
+every other field.
 
-- **Python**: `json=convert_and_respect_annotation_metadata(object_=request, ...)` or bare `json=<kwarg>` — the kwarg's value IS the wire body.
-- **TypeScript**: `const { "X-Header": header, body: _body } = request; ... body: _body` — the `body` interface property's value IS the wire body. (Headers destructured alongside without a `...rest` binding are still recognized and excluded from the body schema.)
-- **Java**: `RequestBody.create(writeValueAsBytes(request.getBody()), ...)` — only `request.getBody()` ships; the rest of the request class is read for headers (via `addHeader(...)`) or unused.
+The flag is set when the spec's request schema isn't an object — a
+type alias to an array, a oneOf without a wrapping object, etc. The
+renderer emits a single synthetic field (`jsonKey: ""`,
+`fieldTemplate: "{{value}}"`, `passthroughBody: true`) plus the
+appropriate `kind` (`list` with `items` resolved, or `object`).
 
-In each case, the schema field for that property carries `passthroughBody: true` so the consumer's renderer sources the value from `body` directly rather than `body[jsonKey]` — the latter fails when the wire body isn't an object (a JSON Patch array has no `body` / `request` property). The flag is absent on every other field, including ordinary body fields and path-param kwargs.
-
-**Synthetic passthrough body (TypeScript).** Some Fern signatures forward the trailing request param to the fetcher directly (`body: request`, no destructure) and declare its type as a top-level type alias rather than an interface — either an array alias (`type JsonPatch = JsonPatchOperation[]`) or a discriminated union (`type AddAuthConfigRequest = A | B | ...`). There is no field catalog to flatten into `body.fields`, so the parser emits a single synthetic field:
-
-- `jsonKey: ""`, `fieldTemplate: "{{value}}"`, `passthroughBody: true`
-- `kind: "list"` (with `items` resolved through the sibling `types/` directory) when the alias is an array
-- `kind: "object"` with no `nested` (the "untyped object fallback") for discriminated unions
-
-`callTemplate` skips the `{ {{__body__}} }` wrapping in this branch — the rendered body literal (`[...]` or `{...}`) supplies its own delimiters, so `client.agent.patch({{id}}, {{__body__}})` substitutes to `client.agent.patch("id", [{...}])` rather than `({ [...] })`.
+`callTemplate` skips the `{ {{__body__}} }` wrapping in this branch
+(TypeScript) — the rendered body literal (`[...]` or `{...}`) supplies
+its own delimiters.
 
 #### Schema completeness
 
-The `render.body.fields` catalog is **spec-full** — it lists every field the
-SDK type allows, regardless of whether the captured example body sets them.
-Each parser reads the type definition on disk:
+The `render.body.fields` catalog is **spec-full** — it lists every field
+the OpenAPI request schema declares, regardless of whether the captured
+example body sets them. Required fields come first, then optional in
+spec declaration order.
 
-- **Java**: opens the request class file (`CohortRequest.java`), pulls every `private final` declaration plus its `@JsonProperty` / `@JsonIgnore` annotation.
-- **Python**: parses the raw client method signature for all typed kwargs.
-- **TypeScript**: parses the request interface (`CohortRequest.ts`) for all property signatures via the TS compiler API.
-
-A field like summary's `template_id` that's only meaningful in certain
-request modes will still appear in the catalog (with `required: false`),
-so a consumer override can introduce it via add/remove rendering.
-
-The `example.request.body` field, by contrast, only shows what the wire
-test happened to populate — that's the *example*, not the schema.
-
-#### Nested object recursion
-
-| Kind                          | TypeScript | Python | Java |
-|-------------------------------|------------|--------|------|
-| `kind: "object"` (nested type) | `nested` schema if the type resolves to a sibling `<resource>/types/<Name>.ts` | Untyped (falls back to JSON-object literal rendering) | `nested` schema if the type resolves to a sibling class file |
-| `kind: "list"` of objects     | `items.nested` populated when item type resolves | `items.kind: "object"` only (no nested schema) | `items.nested` populated when item type resolves |
-
-Python nested-type resolution would require parsing the imported Pydantic
-model file; consumers should fall back to language-native JSON-object
-rendering for `kind: "object"` fields whose `nested` is absent.
+The `example.request.body` field, by contrast, only carries what the
+spec's curated example happened to populate.
 
 #### Per-language `enumConstants` population
 
 | Language    | Populated?         | Shape                                                                  |
 |-------------|--------------------|------------------------------------------------------------------------|
 | Java        | Always for enums   | `{wire: "EnumName.CONSTANT"}` (e.g. `AgentRole.ASSISTANT`)             |
-| TypeScript  | Always for enums   | `{wire: "Namespace.Type.Key"}` (e.g. `AgentChatRequest.Role.Assistant`)|
+| TypeScript  | Always for enums   | `{wire: "Namespace.PascalKey"}` (e.g. `AgentRole.Assistant`)           |
 | Python      | Absent             | Wire-string substitution into `stringLiteral` is the correct render — Pydantic accepts the raw value |
 
 ## Development
@@ -249,7 +236,7 @@ bun install
 bun run test
 ```
 
-Fixtures under `tests/fixtures/` are minimal slices of real SDK repos
-(`phenoml-ts-sdk`, `phenoml-python-sdk`, `phenoml-java-sdk`) plus
-synthetic fixtures (`java-multiline`, `java-schema`) that exercise
-specific parser behaviors.
+Fixtures under `tests/fixtures/` are minimal: a shared `openapi-shared.json`
+plus three language-specific SDK slices (`python/`, `typescript/`, `java/`)
+that mirror the bits of Fern-generated SDK shape the slim chain
+extractors look for.
