@@ -98,13 +98,14 @@ describe("loadSpec", () => {
 
     test("loads endpoints from the fixture spec", () => {
         const endpoints = loadSpec(specPath);
-        expect(endpoints.length).toBe(5);
+        expect(endpoints.length).toBe(6);
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /agent/{id}",
             "GET /agent/list",
             "GET /agent/{id}",
             "POST /agent/create",
+            "POST /agent/dual-content",
             "POST /agent/stream",
         ]);
     });
@@ -142,6 +143,15 @@ describe("loadSpec", () => {
         const stream = endpoints.find((e) => e.httpMethod === "POST" && e.httpPath === "/agent/stream");
         expect(stream?.isStreaming).toBe(true);
         expect(stream?.responseExample).toBeUndefined();
+    });
+
+    test("text/event-stream wins over application/json when both are declared on the same response", () => {
+        // A 2xx that lists both content types is still a streaming endpoint —
+        // the JSON entry is typically a placeholder.
+        const endpoints = loadSpec(specPath);
+        const dual = endpoints.find((e) => e.httpMethod === "POST" && e.httpPath === "/agent/dual-content");
+        expect(dual?.isStreaming).toBe(true);
+        expect(dual?.responseExample).toBeUndefined();
     });
 
     test("resolves $ref schemas into inline shapes", () => {

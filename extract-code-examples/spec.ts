@@ -164,23 +164,29 @@ function pickExampleValue(media: OpenApiMediaType | undefined): unknown | undefi
     return undefined;
 }
 
-// Walks the 2xx responses. The first 2xx with a JSON-flavored content type
-// wins (curated bodies live there). Streaming endpoints surface
-// `text/event-stream` — when that's the only response media type for 2xx,
-// mark isStreaming and don't emit a response example (the placeholder SSE
-// frame would mislead docs).
+// Walks the 2xx responses. If any 2xx declares `text/event-stream`, the
+// endpoint is streaming — docs render an "event stream" badge and the body
+// is suppressed (the placeholder SSE frame would mislead). SSE detection
+// takes precedence: a response that lists both `text/event-stream` AND
+// `application/json` is still a streaming endpoint, and the JSON entry is
+// typically a placeholder. Otherwise the first 2xx with a JSON-flavored
+// content type wins (curated bodies live there).
 function pickResponseExample(op: OpenApiOperation): { responseExample?: unknown; isStreaming: boolean } {
     let isStreaming = false;
+    let jsonExample: unknown | undefined;
     for (const [code, resp] of Object.entries(op.responses ?? {})) {
         if (!/^2/.test(code)) continue;
         const content = resp.content ?? {};
-        const jsonMedia = pickJsonContent(content);
-        if (jsonMedia) {
-            return { responseExample: pickExampleValue(jsonMedia), isStreaming: false };
-        }
         if ("text/event-stream" in content) isStreaming = true;
+        if (jsonExample === undefined) {
+            const jsonMedia = pickJsonContent(content);
+            if (jsonMedia) jsonExample = pickExampleValue(jsonMedia);
+        }
     }
-    return { isStreaming };
+    if (isStreaming) return { isStreaming: true };
+    return jsonExample !== undefined
+        ? { isStreaming: false, responseExample: jsonExample }
+        : { isStreaming: false };
 }
 
 // Resolves $refs and inlines them. Cycle-safe via a visited set carrying the

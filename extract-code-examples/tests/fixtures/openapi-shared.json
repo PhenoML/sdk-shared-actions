@@ -87,6 +87,23 @@
           }
         }
       }
+    },
+    "/agent/dual-content": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Streaming endpoint with a placeholder JSON content type alongside SSE.",
+            "content": {
+              "application/json": {
+                "example": { "placeholder": true }
+              },
+              "text/event-stream": {
+                "example": { "delta": "..." }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
