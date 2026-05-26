@@ -357,6 +357,17 @@ describe("buildRenderSchema", () => {
         expect(render.body?.fields[0].fieldTemplate).toBe(`"name": {{value}}`);
     });
 
+    test("Java: query-only endpoint without a detected request class drops body (no invalid `list(.tags(...))` output)", () => {
+        const list = findSpec("GET", "/agent/list");
+        const render = buildRenderSchema(list, {
+            httpMethod: "GET", httpPath: "/agent/list",
+            methodChain: ["agent", "list"], methodName: "list",
+            // requestClassName intentionally absent — defensive guard fires.
+        }, "java");
+        expect(render.callTemplate).toBe("client.agent().list()");
+        expect(render.body).toBeUndefined();
+    });
+
     test("Java: builder envelope + fluent setters with snake_case→camelCase", () => {
         // Use a synthetic spec field with a snake_case key to exercise the setter conversion.
         const synthetic = {

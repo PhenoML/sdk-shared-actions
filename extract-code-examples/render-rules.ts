@@ -69,6 +69,20 @@ export function buildRenderSchema(
         }
     }
 
+    // Java needs a request class to accept body/query fields — `list(.tags(...))`
+    // doesn't compile. If we somehow have fields but no detected class, drop
+    // the body so the rendered call falls back to the no-arg overload rather
+    // than emitting invalid Java. (Real Fern Java always generates a request
+    // class for query-param endpoints, so this guard only fires on a parser
+    // miss or unusual codegen.)
+    if (language === "java" && body && !isPassthroughBody(body) && !mapping.requestClassName) {
+        console.error(
+            `  WARNING: Java endpoint ${mapping.methodChain.join(".")}.${mapping.methodName} ` +
+            `has body/query fields but no request class — dropping body from render`,
+        );
+        body = undefined;
+    }
+
     const callTemplate = buildCallTemplate(mapping, params, body, language);
 
     const schema: RenderSchema = { callTemplate, params };
