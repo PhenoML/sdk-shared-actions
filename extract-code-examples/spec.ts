@@ -178,7 +178,10 @@ function pickResponseExample(op: OpenApiOperation): { responseExample?: unknown;
         if (!/^2/.test(code)) continue;
         const content = resp.content ?? {};
         if ("text/event-stream" in content) isStreaming = true;
-        if (jsonExample === undefined) {
+        // Once we know it's streaming, the JSON body will be discarded — stop
+        // resolving it. Still need to keep walking responses to catch SSE on
+        // a later 2xx code.
+        if (!isStreaming && jsonExample === undefined) {
             const jsonMedia = pickJsonContent(content);
             if (jsonMedia) jsonExample = pickExampleValue(jsonMedia);
         }

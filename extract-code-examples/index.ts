@@ -66,11 +66,8 @@ export function resolveSpecPath(
     language: Language,
     override?: string,
 ): string {
-    // Honor an explicit `--spec` / `inputs.spec`. Relative overrides resolve
-    // against `rootDir` (matching how README and action.yml describe the spec
-    // as living under the SDK root); absolute paths are taken verbatim. Both
-    // path.resolve branches do the right thing — its semantics: absolute
-    // arg wins, relative arg is joined onto the preceding base.
+    // Relative `--spec` / `inputs.spec` overrides resolve against `rootDir`
+    // (README and action.yml describe the spec as living under the SDK root).
     if (override) return path.resolve(rootDir, override);
 
     // Python's bundle path includes the package name (e.g. src/phenoml/openapi/...).

@@ -48,6 +48,20 @@ export function pascalCase(str: string): string {
     return camel.charAt(0).toUpperCase() + camel.slice(1);
 }
 
+export function screamingSnake(value: string): string {
+    return value.replace(/-/g, "_").toUpperCase();
+}
+
+// Strips Fern's snake_case resource prefix from a `#/components/schemas/...`
+// $refName, leaving the bare PascalCase class name a generator would emit.
+// Multi-word resources matter: `fhir_provider_Provider` → `Provider` (not
+// `provider_Provider`); the trailing PascalCase identifier is matched as a
+// whole. Returns the input unchanged when there's no `_PascalCase` suffix.
+export function stripSchemaPrefix(refName: string): string {
+    const m = refName.match(/_([A-Z][A-Za-z0-9]*)$/);
+    return m ? m[1] : refName;
+}
+
 // Normalize path parameter names in a URL template to snake_case.
 // e.g., /construe/codes/{codeID} → /construe/codes/{code_id}
 // Ensures consistent keys across TS/Python/Java manifests.

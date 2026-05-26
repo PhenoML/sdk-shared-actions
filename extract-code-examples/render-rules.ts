@@ -10,7 +10,7 @@ import type {
     SchemaFieldKind,
     SpecEndpoint,
 } from "./types";
-import { snakeToCamel, pascalCase } from "./utils";
+import { pascalCase, screamingSnake, snakeToCamel, stripSchemaPrefix } from "./utils";
 
 export const RENDER_RULES_BY_LANGUAGE: Record<Language, RenderRules> = {
     typescript: {
@@ -69,24 +69,19 @@ export function buildRenderSchema(
         }
     }
 
-    // Java needs a request class to accept body/query fields — `list(.tags(...))`
-    // doesn't compile. If we have fields but no detected class, surface the
-    // field catalog in `body` for documentation (matching the Python/TS spec
-    // representation) but omit the `{{__body__}}` slot from the callTemplate
-    // so a naïve renderer produces a valid no-arg call instead of invalid
-    // Java. (Real Fern Java always generates a request class for query-param
-    // endpoints, so this guard only fires on a parser miss or unusual
-    // codegen — when it does, the warning calls it out.)
-    const javaBodyNotRenderable =
+    // Java has no syntax for free-floating field setters — without a request
+    // class to wrap them, fall back to a no-arg call signature. The body
+    // catalog stays in the schema for docs/UI; only the call slot is dropped.
+    const javaBodyUnrenderable =
         language === "java" && body !== undefined && !isPassthroughBody(body) && !mapping.requestClassName;
-    if (javaBodyNotRenderable) {
+    if (javaBodyUnrenderable) {
         console.error(
             `  WARNING: Java endpoint ${mapping.methodChain.join(".")} ` +
             `has body/query fields but no request class — call signature won't include them`,
         );
     }
 
-    const callTemplate = buildCallTemplate(mapping, params, javaBodyNotRenderable ? undefined : body, language);
+    const callTemplate = buildCallTemplate(mapping, params, javaBodyUnrenderable ? undefined : body, language);
 
     const schema: RenderSchema = { callTemplate, params };
     if (body) schema.body = body;
@@ -261,16 +256,3 @@ function enumConstantsFor(
     return out;
 }
 
-function screamingSnake(value: string): string {
-    return value.replace(/-/g, "_").toUpperCase();
-}
-
-// Strips Fern's snake_case resource prefix, leaving the bare PascalCase
-// class name a generator would emit. Multi-word resources matter:
-// `fhir_provider_Provider` → `Provider` (NOT `provider_Provider`); the
-// trailing PascalCase identifier is matched as a whole. Returns the input
-// unchanged when there's no `_PascalCase` suffix.
-function stripSchemaPrefix(refName: string): string {
-    const m = refName.match(/_([A-Z][A-Za-z0-9]*)$/);
-    return m ? m[1] : refName;
-}
