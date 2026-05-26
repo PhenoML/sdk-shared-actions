@@ -1,6 +1,16 @@
 import * as fs from "fs";
 import * as path from "path";
 
+// First non-hidden subdirectory under `<root>/src/` — Fern Python SDKs put
+// the package's code (and the bundled openapi.json) under this dir, but the
+// name varies per project (e.g. `phenoml`).
+export function findPythonPackageDir(rootDir: string): string | undefined {
+    const srcDir = path.join(rootDir, "src");
+    if (!fs.existsSync(srcDir)) return undefined;
+    return fs.readdirSync(srcDir, { withFileTypes: true })
+        .find((e) => e.isDirectory() && !e.name.startsWith("_") && !e.name.startsWith("."))?.name;
+}
+
 export function findFiles(dir: string, pattern: RegExp): string[] {
     const results: string[] = [];
     if (!fs.existsSync(dir)) return results;
@@ -29,49 +39,42 @@ export function camelToSnake(str: string): string {
         .toLowerCase();
 }
 
-/**
- * Normalize path parameter names in a URL template to snake_case.
- * e.g., /construe/codes/{codeID} → /construe/codes/{code_id}
- * Ensures consistent keys across TS/Python/Java manifests.
- */
+export function snakeToCamel(str: string): string {
+    return str.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+}
+
+export function pascalCase(str: string): string {
+    const camel = snakeToCamel(str.replace(/-/g, "_"));
+    return camel.charAt(0).toUpperCase() + camel.slice(1);
+}
+
+export function screamingSnake(value: string): string {
+    return value.replace(/-/g, "_").toUpperCase();
+}
+
+// Strips Fern's snake_case resource prefix from a `#/components/schemas/...`
+// $refName, leaving the bare PascalCase class name a generator would emit.
+// Multi-word resources matter: `fhir_provider_Provider` → `Provider` (not
+// `provider_Provider`); the trailing PascalCase identifier is matched as a
+// whole.
+//
+// Returns null when the name has multiple PascalCase segments separated by
+// underscores (e.g. `agent_AgentChatRequest_Role`) — that pattern is ambiguous
+// between a concatenated class (`AgentChatRequestRole`) and a nested namespace
+// (`AgentChatRequest.Role`), and the spec alone can't disambiguate. Callers
+// should skip emitting any identifier in that case rather than guess wrong.
+//
+// Returns the input unchanged when there's no `_PascalCase` suffix.
+export function stripSchemaPrefix(refName: string): string | null {
+    const pascalSegments = refName.match(/_[A-Z][A-Za-z0-9]*/g);
+    if (pascalSegments && pascalSegments.length > 1) return null;
+    const m = refName.match(/_([A-Z][A-Za-z0-9]*)$/);
+    return m ? m[1] : refName;
+}
+
+// Normalize path parameter names in a URL template to snake_case.
+// e.g., /construe/codes/{codeID} → /construe/codes/{code_id}
+// Ensures consistent keys across TS/Python/Java manifests.
 export function normalizePathParams(httpPath: string): string {
     return httpPath.replace(/\{(\w+)\}/g, (_, name) => `{${camelToSnake(name)}}`);
-}
-
-export function isBalancedParens(str: string): boolean {
-    let depth = 0;
-    for (const ch of str) {
-        if (ch === "(") depth++;
-        if (ch === ")") depth--;
-        if (depth < 0) return false;
-    }
-    return depth === 0;
-}
-
-// Naive about strings/comments — same trade-off as isBalancedParens, which
-// is fine for Fern-generated test bodies (no parens-in-strings in args).
-// Drops trailing punctuation when the SDK call appears in a compound
-// statement like `for _ in client.foo(...):` — the regex captures the `:`
-// from the `for` header along with the call.
-export function truncateAfterMatchingParen(s: string): string {
-    let depth = 0;
-    for (let i = 0; i < s.length; i++) {
-        if (s[i] === "(") depth++;
-        else if (s[i] === ")" && --depth === 0) return s.slice(0, i + 1);
-    }
-    return s;
-}
-
-// True if `concretePath` matches `templatePath` segment-by-segment, treating
-// any "{name}" segment in the template as a wildcard. e.g. "/agent/{id}"
-// matches "/agent/abc123".
-export function pathMatchesTemplate(templatePath: string, concretePath: string): boolean {
-    const tmpl = templatePath.split("/");
-    const concrete = concretePath.split("/");
-    if (tmpl.length !== concrete.length) return false;
-    for (let i = 0; i < tmpl.length; i++) {
-        if (tmpl[i].startsWith("{") && tmpl[i].endsWith("}")) continue;
-        if (tmpl[i] !== concrete[i]) return false;
-    }
-    return true;
 }

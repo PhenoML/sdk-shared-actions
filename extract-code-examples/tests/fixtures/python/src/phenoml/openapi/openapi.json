@@ -1,0 +1,124 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Fixture API", "version": "fixture-abc123" },
+  "paths": {
+    "/agent/create": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/agent_AgentCreateRequest" },
+              "example": {
+                "name": "Medical Assistant",
+                "description": "Helps with FHIR coding",
+                "role": "assistant"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/agent_AgentResponse" },
+                "example": { "id": "agent_123", "name": "Medical Assistant" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/{id}": {
+      "get": {
+        "parameters": [ { "$ref": "#/components/parameters/agent_IdParam" } ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": { "id": "agent_123", "name": "Medical Assistant" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "parameters": [ { "$ref": "#/components/parameters/agent_IdParam" } ],
+        "responses": { "204": { "description": "Deleted" } }
+      }
+    },
+    "/agent/list": {
+      "get": {
+        "parameters": [
+          { "name": "tags", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "value": { "agents": [ { "id": "agent_123" } ] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agent/stream": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "properties": { "prompt": { "type": "string" } } },
+              "example": { "prompt": "hello" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "example": { "delta": "..." }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "agent_IdParam": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      }
+    },
+    "schemas": {
+      "agent_AgentCreateRequest": {
+        "type": "object",
+        "required": ["name", "role"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "role": { "$ref": "#/components/schemas/agent_AgentRole" }
+        }
+      },
+      "agent_AgentRole": {
+        "type": "string",
+        "enum": ["assistant", "user", "system"]
+      },
+      "agent_AgentResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" }
+        }
+      }
+    }
+  }
+}
