@@ -49,10 +49,21 @@ public class RawAgentClient {
         return null;
     }
 
+    // Real Fern Java wraps every query-param endpoint in a request class
+    // (`AgentListRequest` here), regardless of how many query params the spec
+    // declares. The full impl signature is `(AgentListRequest, RequestOptions)`;
+    // the no-arg overload delegates to it. The parser's last-non-RequestOptions
+    // heuristic picks up AgentListRequest, so callTemplate gets the builder wrap.
     public PhenoMLHttpResponse<AgentListResponse> list() {
-        return list(null);
+        return list(AgentListRequest.builder().build());
     }
     public PhenoMLHttpResponse<AgentListResponse> list(RequestOptions requestOptions) {
+        return list(AgentListRequest.builder().build(), requestOptions);
+    }
+    public PhenoMLHttpResponse<AgentListResponse> list(AgentListRequest request) {
+        return list(request, null);
+    }
+    public PhenoMLHttpResponse<AgentListResponse> list(AgentListRequest request, RequestOptions requestOptions) {
         HttpUrl httpUrl = HttpUrl.parse("https://example").newBuilder()
                 .addPathSegments("agent/list")
                 .build();

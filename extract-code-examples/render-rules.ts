@@ -72,6 +72,14 @@ export function buildRenderSchema(
     // Java has no syntax for free-floating field setters — without a request
     // class to wrap them, fall back to a no-arg call signature. The body
     // catalog stays in the schema for docs/UI; only the call slot is dropped.
+    //
+    // This is parser-miss recovery, NOT a routine path. Real Fern Java wraps
+    // every query-param endpoint in a request class (`list(AgentListRequest,
+    // RequestOptions)`), so the parser's last-non-RequestOptions heuristic
+    // always finds the class. Fern Java has no codegen pattern that emits
+    // scalar query args directly as method parameters. If this guard fires,
+    // either codegen changed shape or the parser's signature matcher missed
+    // a case — the warning surfaces it for investigation.
     const javaBodyUnrenderable =
         language === "java" && body !== undefined && !isPassthroughBody(body) && !mapping.requestClassName;
     if (javaBodyUnrenderable) {
