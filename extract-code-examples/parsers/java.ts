@@ -3,6 +3,19 @@ import * as path from "path";
 import type { EndpointMapping, LanguageParser } from "../types";
 import { camelToSnake, findFiles, normalizePath } from "../utils";
 
+// Slim Java chain extractor. Depends on the following Fern codegen patterns:
+//   1. Raw clients live at `src/main/java/.../resources/<group>/Raw<Name>Client.java`
+//   2. Endpoint methods return `PhenoMLHttpResponse<T>` or `PhenomlClientHttpResponse<T>`
+//   3. URL is built via `HttpUrl.parse(...).newBuilder().addPathSegments("literal")`
+//      and `.addPathSegment(<identifier>)` for path params (separate calls)
+//   4. HTTP method is set via `.method("VERB", body)` on the request builder
+//   5. The last non-`RequestOptions` method parameter is the request body class
+//   6. Top-level clients (`PhenomlClient.java`) declare `public XxxClient name()`
+//      accessors that map resource directories to camelCase method names
+//
+// If codegen drifts and we extract zero endpoints from non-empty source,
+// parseEndpoints throws with a clear error rather than silently emitting an
+// empty manifest.
 export function createJavaParser(): LanguageParser {
     return {
         language: "java",
@@ -37,6 +50,13 @@ export function createJavaParser(): LanguageParser {
                 const fileEndpoints = javaExtractEndpoints(file, resourcesDir, accessorMap);
                 endpoints.push(...fileEndpoints);
                 console.error(`  ${path.relative(rootDir, file)}: ${fileEndpoints.length} endpoints`);
+            }
+            if (endpoints.length === 0) {
+                throw new Error(
+                    `Java parser found ${rawClientFiles.length} RawClient file(s) but extracted 0 endpoints. ` +
+                    `Fern codegen format may have changed — verify the expected patterns ` +
+                    `(see parsers/java.ts header for the full list).`,
+                );
             }
             return endpoints;
         },

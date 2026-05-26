@@ -82,7 +82,8 @@ export function loadSpec(specPath: string): SpecEndpoint[] {
     const resolveCache = new Map<string, ResolvedSchema>();
     const endpoints: SpecEndpoint[] = [];
 
-    for (const [rawPath, pathItem] of Object.entries(doc.paths ?? {})) {
+    const pathEntries = Object.entries(doc.paths ?? {});
+    for (const [rawPath, pathItem] of pathEntries) {
         const httpPath = normalizePathParams(rawPath);
         const pathLevelParams = pathItem.parameters ?? [];
         for (const [methodLower, op] of Object.entries(pathItem)) {
@@ -98,6 +99,12 @@ export function loadSpec(specPath: string): SpecEndpoint[] {
                 resolveCache,
             ));
         }
+    }
+    if (pathEntries.length > 0 && endpoints.length === 0) {
+        throw new Error(
+            `Spec at ${specPath} declares ${pathEntries.length} path(s) but loaded 0 endpoints — ` +
+            `check that operations use standard HTTP methods (get/post/put/delete/patch).`,
+        );
     }
     return endpoints;
 }

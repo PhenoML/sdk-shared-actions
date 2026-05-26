@@ -3,6 +3,19 @@ import * as path from "path";
 import type { EndpointMapping, LanguageParser } from "../types";
 import { findFiles, findPythonPackageDir, normalizePath, normalizePathParams } from "../utils";
 
+// Slim Python chain extractor. Depends on the following Fern codegen patterns:
+//   1. Package lives at `src/<pkg>/`; raw clients at `<pkg>/.../raw_client.py`
+//   2. Sync class is `class Raw<Name>Client:` (Async twin is skipped)
+//   3. Endpoint methods are 4-space-indented `def <name>(self, ...):`
+//   4. HTTP call is `self._client_wrapper.httpx_client.request(...)` or
+//      `httpx_client.stream(...)` for SSE
+//   5. Path is the first positional arg, either `"literal"` or `f"<template>"`;
+//      path-param wrappers like `encode_path_param(<ident>)` are stripped
+//   6. HTTP method is the `method="VERB"` kwarg
+//
+// If codegen drifts and we extract zero endpoints from non-empty source,
+// parseEndpoints throws with a clear error rather than silently emitting an
+// empty manifest.
 export function createPythonParser(): LanguageParser {
     return {
         language: "python",
@@ -13,11 +26,19 @@ export function createPythonParser(): LanguageParser {
                 return [];
             }
             const pkgRoot = path.join(rootDir, "src", pkgDir);
+            const rawClientFiles = findFiles(pkgRoot, /raw_client\.py$/);
             const endpoints: EndpointMapping[] = [];
-            for (const file of findFiles(pkgRoot, /raw_client\.py$/)) {
+            for (const file of rawClientFiles) {
                 const fileEndpoints = pyExtractEndpoints(file, pkgRoot);
                 endpoints.push(...fileEndpoints);
                 console.error(`  ${path.relative(rootDir, file)}: ${fileEndpoints.length} endpoints`);
+            }
+            if (rawClientFiles.length > 0 && endpoints.length === 0) {
+                throw new Error(
+                    `Python parser found ${rawClientFiles.length} raw_client.py file(s) but extracted 0 endpoints. ` +
+                    `Fern codegen format may have changed — verify the expected patterns ` +
+                    `(see parsers/python.ts header for the full list).`,
+                );
             }
             return endpoints;
         },

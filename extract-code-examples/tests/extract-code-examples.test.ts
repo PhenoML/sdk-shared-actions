@@ -715,6 +715,86 @@ describe("buildManifest end-to-end", () => {
 // Java accessor map (a quirk worth keeping)
 // ============================================================
 
+describe("bulk-failure guards", () => {
+    test("Java parser throws when raw clients exist but produce 0 endpoints (codegen drift)", () => {
+        // Write a temp SDK tree with a Raw client whose return type doesn't
+        // match the expected `PhenoMLHttpResponse<T>` pattern — the parser
+        // should reject this loudly rather than silently emitting nothing.
+        const tmp = path.join(import.meta.dir, "tmp-broken-java");
+        const javaPkg = path.join(tmp, "src/main/java/com/x/api/resources/foo");
+        fs.mkdirSync(javaPkg, { recursive: true });
+        fs.writeFileSync(
+            path.join(javaPkg, "RawFooClient.java"),
+            "package com.x.api.resources.foo;\npublic class RawFooClient {\n" +
+            "  public SomeOtherWrapper<String> doStuff() { return null; }\n}\n",
+        );
+        try {
+            expect(() => createJavaParser().parseEndpoints(tmp)).toThrow(/extracted 0 endpoints/);
+        } finally {
+            fs.rmSync(tmp, { recursive: true, force: true });
+        }
+    });
+
+    test("Python parser throws when raw_client.py files exist but produce 0 endpoints", () => {
+        const tmp = path.join(import.meta.dir, "tmp-broken-py");
+        const pkg = path.join(tmp, "src/x/foo");
+        fs.mkdirSync(pkg, { recursive: true });
+        fs.writeFileSync(
+            path.join(pkg, "raw_client.py"),
+            "class RawFooClient:\n    def __init__(self): pass\n",
+        );
+        try {
+            expect(() => createPythonParser().parseEndpoints(tmp)).toThrow(/extracted 0 endpoints/);
+        } finally {
+            fs.rmSync(tmp, { recursive: true, force: true });
+        }
+    });
+
+    test("TypeScript parser throws when Client.ts files exist but produce 0 endpoints", () => {
+        const tmp = path.join(import.meta.dir, "tmp-broken-ts");
+        const dir = path.join(tmp, "src/api/resources/foo/client");
+        fs.mkdirSync(dir, { recursive: true });
+        // Class without any `__methodName` impl matches the file pattern but
+        // yields no endpoints.
+        fs.writeFileSync(
+            path.join(dir, "Client.ts"),
+            "export class FooClient { public greet() { return 'hi'; } }\n",
+        );
+        try {
+            expect(() => createTypeScriptParser().parseEndpoints(tmp)).toThrow(/extracted 0 endpoints/);
+        } finally {
+            fs.rmSync(tmp, { recursive: true, force: true });
+        }
+    });
+
+    test("loadSpec throws when paths exist but no operation uses a recognized HTTP method", () => {
+        const tmp = path.join(import.meta.dir, "tmp-broken-spec.json");
+        fs.writeFileSync(tmp, JSON.stringify({
+            openapi: "3.0.3",
+            info: { title: "x", version: "1" },
+            paths: { "/foo": { options: { responses: { "200": { description: "ok" } } } } },
+        }));
+        try {
+            expect(() => loadSpec(tmp)).toThrow(/loaded 0 endpoints/);
+        } finally {
+            fs.rmSync(tmp, { force: true });
+        }
+    });
+
+    test("buildManifest throws when spec and SDK both have endpoints but none align", () => {
+        const spec = loadSpec(path.join(FIXTURES, "openapi-shared.json"));
+        // SDK mapping with paths that don't match any spec endpoint — simulates
+        // a path-normalization regression where the parser's templates drift.
+        const orphanMappings = [{
+            httpMethod: "GET", httpPath: "/totally/different/path",
+            methodChain: ["other"], methodName: "other",
+        }];
+        expect(() => buildManifest(spec, orphanMappings, "python", "x", {
+            generatorName: "x", sdkVersion: "1", originGitCommit: "1",
+        })).toThrow(/Joined 0 of/);
+    });
+});
+
 describe("javaBuildAccessorMap", () => {
     test("maps resource directories to camelCase accessor method names", () => {
         const map = javaBuildAccessorMap(path.join(FIXTURES, "java/src/main/java"));

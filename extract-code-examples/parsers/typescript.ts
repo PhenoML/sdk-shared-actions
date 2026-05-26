@@ -4,6 +4,20 @@ import * as path from "path";
 import type { EndpointMapping, LanguageParser } from "../types";
 import { findFiles, normalizePathParams } from "../utils";
 
+// Slim TypeScript chain extractor. Depends on the following Fern codegen patterns:
+//   1. Resource clients live at `src/api/resources/.../client/Client.ts`
+//   2. Endpoint impls are `private async __<name>(...)` (the public method
+//      delegates to the private impl)
+//   3. The impl body contains a fetcher object literal with `url:` and
+//      `method:` properties
+//   4. URL is one of: `core.url.join(<base>, <pathArg>)`, a string literal,
+//      a template literal with substitutions, or a `${baseUrl}`-prefix template
+//   5. Path-param substitutions are bare identifiers or
+//      `core.url.encodePathParam(<ident>)` calls
+//
+// If codegen drifts and we extract zero endpoints from non-empty source,
+// parseEndpoints throws with a clear error rather than silently emitting an
+// empty manifest.
 export function createTypeScriptParser(): LanguageParser {
     return {
         language: "typescript",
@@ -14,6 +28,13 @@ export function createTypeScriptParser(): LanguageParser {
                 const fileEndpoints = tsExtractEndpoints(file);
                 endpoints.push(...fileEndpoints);
                 console.error(`  ${path.relative(rootDir, file)}: ${fileEndpoints.length} endpoints`);
+            }
+            if (clientFiles.length > 0 && endpoints.length === 0) {
+                throw new Error(
+                    `TypeScript parser found ${clientFiles.length} Client.ts file(s) but extracted 0 endpoints. ` +
+                    `Fern codegen format may have changed — verify the expected patterns ` +
+                    `(see parsers/typescript.ts header for the full list).`,
+                );
             }
             return endpoints;
         },

@@ -71,5 +71,15 @@ export function buildManifest(
 
     console.error(`\n  Matched: ${matched}, Unmatched: ${unmatched}`);
     console.error(`  Coverage: ${matched}/${specEndpoints.length} spec endpoints have SDK mappings`);
+
+    // Both sides had endpoints but none aligned — a parser/spec contract
+    // mismatch (path normalization, method-name casing, etc.) that would
+    // silently produce an empty manifest. Fail loudly instead.
+    if (matched === 0 && specEndpoints.length > 0 && endpointMappings.length > 0) {
+        throw new Error(
+            `Joined 0 of ${specEndpoints.length} spec endpoints against ${endpointMappings.length} SDK mapping(s). ` +
+            `Path templates likely don't agree between the spec and the parsed SDK — inspect the warnings above.`,
+        );
+    }
     return manifest;
 }
