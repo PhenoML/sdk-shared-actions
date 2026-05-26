@@ -125,6 +125,22 @@
           "200": { "content": { "application/json": { "example": { "ok": true } } } }
         }
       }
+    },
+    "/agent/{id}/comments/{comment_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/agent_IdParam" },
+        { "name": "comment_id", "in": "path", "required": true, "schema": { "type": "string" } },
+        { "name": "verbose", "in": "query", "schema": { "type": "boolean" } }
+      ],
+      "get": {
+        "responses": { "200": { "content": { "application/json": { "example": { "id": "c1" } } } } }
+      },
+      "patch": {
+        "parameters": [
+          { "name": "verbose", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "204": { "description": "No content" } }
+      }
     }
   },
   "components": {

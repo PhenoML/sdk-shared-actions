@@ -98,17 +98,35 @@ describe("loadSpec", () => {
 
     test("loads endpoints from the fixture spec", () => {
         const endpoints = loadSpec(specPath);
-        expect(endpoints.length).toBe(7);
+        expect(endpoints.length).toBe(9);
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /agent/{id}",
             "GET /agent/list",
             "GET /agent/{id}",
+            "GET /agent/{id}/comments/{comment_id}",
+            "PATCH /agent/{id}/comments/{comment_id}",
             "POST /agent/create",
             "POST /agent/dual-content",
             "POST /agent/stream",
             "POST /agent/union",
         ]);
+    });
+
+    test("path-level parameters are inherited by every operation on the path", () => {
+        const endpoints = loadSpec(specPath);
+        // GET has no parameters of its own — should inherit all three path-level entries.
+        const get = endpoints.find((e) => e.httpMethod === "GET" && e.httpPath === "/agent/{id}/comments/{comment_id}");
+        expect(get?.pathParams.map((p) => p.name)).toEqual(["id", "comment_id"]);
+        expect(get?.queryParams).toEqual([{ name: "verbose", schema: { type: "boolean" } }]);
+    });
+
+    test("operation-level parameters override path-level entries by (name, in)", () => {
+        const endpoints = loadSpec(specPath);
+        // PATCH overrides `verbose` (boolean at path level → string at op level).
+        const patch = endpoints.find((e) => e.httpMethod === "PATCH" && e.httpPath === "/agent/{id}/comments/{comment_id}");
+        expect(patch?.pathParams.map((p) => p.name)).toEqual(["id", "comment_id"]);
+        expect(patch?.queryParams).toEqual([{ name: "verbose", schema: { type: "string" } }]);
     });
 
     test("resolves $ref parameters", () => {

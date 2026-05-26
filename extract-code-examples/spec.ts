@@ -3,11 +3,19 @@ import type { ResolvedSchema, SpecEndpoint, SpecParam } from "./types";
 import { normalizePathParams } from "./utils";
 
 interface OpenApiDocument {
-    paths: Record<string, Record<string, OpenApiOperation>>;
+    paths: Record<string, OpenApiPathItem>;
     components?: {
         schemas?: Record<string, OpenApiSchemaNode>;
         parameters?: Record<string, OpenApiParameter>;
     };
+}
+
+// A path item carries optional shared `parameters` alongside per-method
+// operations. OpenAPI 3 says path-level parameters are inherited by every
+// operation on that path; operation-level parameters override by (name, in).
+interface OpenApiPathItem {
+    parameters?: OpenApiParameterRef[];
+    [method: string]: OpenApiOperation | OpenApiParameterRef[] | undefined;
 }
 
 interface OpenApiOperation {
@@ -74,14 +82,46 @@ export function loadSpec(specPath: string): SpecEndpoint[] {
     const resolveCache = new Map<string, ResolvedSchema>();
     const endpoints: SpecEndpoint[] = [];
 
-    for (const [rawPath, methods] of Object.entries(doc.paths ?? {})) {
+    for (const [rawPath, pathItem] of Object.entries(doc.paths ?? {})) {
         const httpPath = normalizePathParams(rawPath);
-        for (const [methodLower, op] of Object.entries(methods)) {
+        const pathLevelParams = pathItem.parameters ?? [];
+        for (const [methodLower, op] of Object.entries(pathItem)) {
             if (!HTTP_METHODS.has(methodLower)) continue;
-            endpoints.push(buildSpecEndpoint(methodLower.toUpperCase(), httpPath, op, schemas, parameters, resolveCache));
+            const operation = op as OpenApiOperation;
+            const mergedParams = mergeParameters(pathLevelParams, operation.parameters ?? [], parameters);
+            endpoints.push(buildSpecEndpoint(
+                methodLower.toUpperCase(),
+                httpPath,
+                { ...operation, parameters: mergedParams },
+                schemas,
+                parameters,
+                resolveCache,
+            ));
         }
     }
     return endpoints;
+}
+
+// Combine path-level parameters (inherited by every operation on the path)
+// with operation-level parameters. Per OpenAPI 3, the operation entry wins
+// when both share (name, in). Path-level entries come first so URL-order
+// declarations stay aligned when operations only add new params.
+function mergeParameters(
+    pathLevel: OpenApiParameterRef[],
+    opLevel: OpenApiParameterRef[],
+    registry: Record<string, OpenApiParameter>,
+): OpenApiParameterRef[] {
+    if (pathLevel.length === 0) return opLevel;
+    const opKeys = new Set<string>();
+    for (const ref of opLevel) {
+        const p = resolveParameter(ref, registry);
+        if (p) opKeys.add(`${p.in}:${p.name}`);
+    }
+    const inherited = pathLevel.filter((ref) => {
+        const p = resolveParameter(ref, registry);
+        return !p || !opKeys.has(`${p.in}:${p.name}`);
+    });
+    return [...inherited, ...opLevel];
 }
 
 function buildSpecEndpoint(
