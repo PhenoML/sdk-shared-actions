@@ -77,24 +77,39 @@ function tsExtractFetcherCall(body: ts.Block): { method: string; path: string } 
     return { method, path: pathStr.startsWith("/") ? pathStr : "/" + pathStr };
 }
 
-// `url:` is typically `core.url.join(<base>, <pathArg>)` where pathArg is
-// either a string literal ("agent/create") or a template literal
-// (`agent/${core.url.encodePathParam(id)}`). The last argument is the
-// path; the base arg is environment plumbing we don't care about.
+// `url:` can take several shapes across Fern TS codegen generations:
+//   - `core.url.join(<base>, <pathArg>)` — current Fern; recurse into the
+//     last argument (the path)
+//   - `"https://example/agent/create"` — older Fern test/example shape
+//   - `` `https://example/agent/${id}` `` — older Fern with substitutions
+//   - `` `${baseUrl}/agent/${id}` `` — baseUrl-substitution prefix style
+// In every shape, the path portion is whatever remains after stripping a
+// leading `http(s)://host` or a leading `{placeholder}` (baseUrl substitution).
 function tsExtractUrlPath(node: ts.Expression): string | null {
-    if (!ts.isCallExpression(node)) return null;
-    const args = node.arguments;
-    if (args.length === 0) return null;
-    const last = args[args.length - 1];
-    if (ts.isStringLiteral(last) || ts.isNoSubstitutionTemplateLiteral(last)) return last.text;
-    if (ts.isTemplateExpression(last)) {
-        // Rebuild the template, replacing each `${core.url.encodePathParam(x)}`
-        // span with `{x}` so the result matches the OpenAPI path template.
-        let out = last.head.text;
-        for (const span of last.templateSpans) {
+    const full = tsRenderUrlExpression(node);
+    if (full === null) return null;
+    // Strip any leading absolute-URL prefix (real or substituted host) so
+    // we're left with the path portion the OpenAPI template encodes.
+    const stripped = full.replace(/^https?:\/\/[^/]+/, "").replace(/^\{[^}]+\}/, "");
+    return stripped || null;
+}
+
+// Renders the url-property expression as a string, replacing `${expr}` spans
+// with `{name}` placeholders. Returns null if the expression isn't a form we
+// understand (e.g. a bare identifier reference to a precomputed URL).
+function tsRenderUrlExpression(node: ts.Expression): string | null {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+        return node.text;
+    }
+    if (ts.isTemplateExpression(node)) {
+        let out = node.head.text;
+        for (const span of node.templateSpans) {
             out += `{${tsExtractPathParamName(span.expression)}}` + span.literal.text;
         }
         return out;
+    }
+    if (ts.isCallExpression(node) && node.arguments.length > 0) {
+        return tsRenderUrlExpression(node.arguments[node.arguments.length - 1]);
     }
     return null;
 }

@@ -58,6 +58,37 @@ export class AgentClient {
         return _response;
     }
 
+    // Legacy Fern shape: direct string-literal URL with embedded host.
+    public legacyString(): Promise<unknown> { return this.__legacyString(); }
+    private async __legacyString(): Promise<unknown> {
+        const _response = await core.fetcher({
+            url: "https://example/agent/legacy",
+            method: "POST",
+        });
+        return _response;
+    }
+
+    // Legacy Fern shape: direct template-literal URL with absolute host and
+    // a bare-identifier path-param substitution.
+    public legacyTemplate(id: string): Promise<unknown> { return this.__legacyTemplate(id); }
+    private async __legacyTemplate(id: string): Promise<unknown> {
+        const _response = await core.fetcher({
+            url: `https://example/agent/${id}/legacy`,
+            method: "GET",
+        });
+        return _response;
+    }
+
+    // Older Fern shape: `${baseUrl}` substitution as the URL prefix.
+    public baseUrlSubst(id: string): Promise<unknown> { return this.__baseUrlSubst(id); }
+    private async __baseUrlSubst(id: string): Promise<unknown> {
+        const _response = await core.fetcher({
+            url: `${this._options.baseUrl}/agent/${id}/subst`,
+            method: "GET",
+        });
+        return _response;
+    }
+
     private _options: { baseUrl: string } = { baseUrl: "https://example" };
 }
 

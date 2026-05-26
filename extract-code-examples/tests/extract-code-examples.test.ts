@@ -218,7 +218,10 @@ describe("tsExtractEndpoints", () => {
             "DELETE /agent/{id}",
             "GET /agent/list",
             "GET /agent/{id}",
+            "GET /agent/{id}/legacy",
+            "GET /agent/{id}/subst",
             "POST /agent/create",
+            "POST /agent/legacy",
             "POST /agent/stream",
         ]);
     });
@@ -228,6 +231,20 @@ describe("tsExtractEndpoints", () => {
         const endpoints = tsExtractEndpoints(file);
         const get = endpoints.find((e) => e.httpMethod === "GET" && e.httpPath === "/agent/{id}");
         expect(get?.methodChain).toEqual(["agent", "get"]);
+    });
+
+    test("legacy URL shapes (direct string, absolute template literal, ${baseUrl}-prefix template) all parse", () => {
+        const file = path.join(FIXTURES, "typescript/src/api/resources/agent/client/Client.ts");
+        const endpoints = tsExtractEndpoints(file);
+        // Direct string literal with embedded host.
+        const legacyString = endpoints.find((e) => e.methodName === "legacyString");
+        expect(legacyString?.httpPath).toBe("/agent/legacy");
+        // Direct template literal with absolute host and bare-identifier substitution.
+        const legacyTemplate = endpoints.find((e) => e.methodName === "legacyTemplate");
+        expect(legacyTemplate?.httpPath).toBe("/agent/{id}/legacy");
+        // ${baseUrl} substitution as URL prefix.
+        const baseUrlSubst = endpoints.find((e) => e.methodName === "baseUrlSubst");
+        expect(baseUrlSubst?.httpPath).toBe("/agent/{id}/subst");
     });
 });
 
