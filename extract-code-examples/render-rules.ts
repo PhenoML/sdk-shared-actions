@@ -215,13 +215,25 @@ function populateNested(field: SchemaField, prop: ResolvedSchema, language: Lang
     // signal. Java needs a builder envelope on the wrap; TS needs a `{ ... }`
     // envelope so list items and nested fields produce valid object literals.
     if (field.kind === "object" && prop.$refName && prop.properties && language !== "python") {
-        const nested = buildBodySchema(prop, language);
-        nested.wrap = language === "java"
-            ? javaBuilderWrap(stripSchemaPrefix(prop.$refName))
+        const wrap = language === "java"
+            ? javaBuilderWrapFor(prop.$refName)
             : "{ {{__body__}} }";
-        field.nested = nested;
+        // Java without a confident class name (e.g. ambiguous nested ref) has
+        // no usable builder envelope — `.foo("bar")` outside a builder doesn't
+        // compile. Skip nested so the consumer renders the example value
+        // verbatim instead of emitting broken setter chains.
+        if (wrap !== null) {
+            const nested = buildBodySchema(prop, language);
+            nested.wrap = wrap;
+            field.nested = nested;
+        }
     }
     return field;
+}
+
+function javaBuilderWrapFor(refName: string): string | null {
+    const className = stripSchemaPrefix(refName);
+    return className ? javaBuilderWrap(className) : null;
 }
 
 function inferKind(schema: ResolvedSchema | undefined): SchemaFieldKind {
@@ -255,7 +267,11 @@ function enumConstantsFor(
     // Python accepts the wire string directly; no typed constant needed.
     if (language === "python") return undefined;
     if (!prop.enum || !prop.$refName) return undefined;
+    // Ambiguous schema names (multiple PascalCase segments) can't be mapped
+    // to a single SDK identifier — fall back to plain string rendering, which
+    // type-checks against the enum's `keyof typeof` literal union.
     const className = stripSchemaPrefix(prop.$refName);
+    if (!className) return undefined;
     const out: Record<string, string> = {};
     for (const v of prop.enum) {
         const value = String(v);

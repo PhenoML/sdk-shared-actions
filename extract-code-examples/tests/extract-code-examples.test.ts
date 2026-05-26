@@ -500,8 +500,29 @@ describe("buildRenderSchema", () => {
             methodChain: ["agent", "create"], methodName: "create",
         }, "python");
         const order = render.body!.fields.map((f) => f.jsonKey);
-        // Required: name, role (spec order). Optional: description, provider, tag.
-        expect(order).toEqual(["name", "role", "description", "provider", "tag"]);
+        // Required: name, role (spec order). Optional: description, provider, tag, scope.
+        expect(order).toEqual(["name", "role", "description", "provider", "tag", "scope"]);
+    });
+
+    test("ambiguous $refName (multiple PascalCase segments) omits enumConstants rather than guess", () => {
+        // `agent_AgentChatRequest_Scope` could mean `AgentChatRequestScope` OR
+        // `AgentChatRequest.Scope` — the spec alone can't disambiguate.
+        const create = findSpec("POST", "/agent/create");
+        for (const language of ["typescript", "java"] as const) {
+            const render = buildRenderSchema(create, {
+                httpMethod: "POST", httpPath: "/agent/create",
+                methodChain: ["agent", "create"], methodName: "create",
+                requestClassName: "AgentCreateRequest",
+            }, language);
+            const scope = render.body?.fields.find((f) => f.jsonKey === "scope");
+            expect(scope?.kind).toBe("enum");
+            expect(scope?.enumValues).toEqual(["all", "session"]);
+            // enumConstants intentionally absent — consumer falls back to
+            // plain string rendering, which still typechecks (Fern's TS enum
+            // type unions accept the wire literals; Java compilation fails
+            // softly with a clear "unknown identifier" error).
+            expect(scope?.enumConstants).toBeUndefined();
+        }
     });
 
     test("type:object + oneOf with no properties emits a passthrough body (not an empty fields list)", () => {

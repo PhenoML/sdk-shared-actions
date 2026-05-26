@@ -56,8 +56,18 @@ export function screamingSnake(value: string): string {
 // $refName, leaving the bare PascalCase class name a generator would emit.
 // Multi-word resources matter: `fhir_provider_Provider` → `Provider` (not
 // `provider_Provider`); the trailing PascalCase identifier is matched as a
-// whole. Returns the input unchanged when there's no `_PascalCase` suffix.
-export function stripSchemaPrefix(refName: string): string {
+// whole.
+//
+// Returns null when the name has multiple PascalCase segments separated by
+// underscores (e.g. `agent_AgentChatRequest_Role`) — that pattern is ambiguous
+// between a concatenated class (`AgentChatRequestRole`) and a nested namespace
+// (`AgentChatRequest.Role`), and the spec alone can't disambiguate. Callers
+// should skip emitting any identifier in that case rather than guess wrong.
+//
+// Returns the input unchanged when there's no `_PascalCase` suffix.
+export function stripSchemaPrefix(refName: string): string | null {
+    const pascalSegments = refName.match(/_[A-Z][A-Za-z0-9]*/g);
+    if (pascalSegments && pascalSegments.length > 1) return null;
     const m = refName.match(/_([A-Z][A-Za-z0-9]*)$/);
     return m ? m[1] : refName;
 }
