@@ -23,6 +23,7 @@ import {
     parseJavaClass,
     parseJavaEnumValues,
     parseJavaFieldDeclarations,
+    parseJavaForwardCompatibleEnum,
     parseJavaJsonIgnoredFields,
     parseJavaJsonProperties,
     parseJavaStagedBuilderOrder,
@@ -1705,6 +1706,45 @@ describe("parseJavaStagedBuilderOrder", () => {
     });
 });
 
+describe("parseJavaForwardCompatibleEnum", () => {
+    test("captures constant-name / wire-value pairs from `public static final` declarations", () => {
+        const source = `
+            public final class JsonPatchOperationOp {
+                public static final JsonPatchOperationOp ADD = new JsonPatchOperationOp(Value.ADD, "add");
+                public static final JsonPatchOperationOp REPLACE = new JsonPatchOperationOp(Value.REPLACE, "replace");
+                private final Value value;
+                private final String string;
+            }
+        `;
+        expect(parseJavaForwardCompatibleEnum(source, "JsonPatchOperationOp")).toEqual([
+            { constantName: "ADD", wireValue: "add" },
+            { constantName: "REPLACE", wireValue: "replace" },
+        ]);
+    });
+
+    test("returns empty for a regular request class with no matching constants", () => {
+        const source = `
+            public final class CreateAgentRequest {
+                private final String name;
+                public static OpStage builder() { return new Builder(); }
+            }
+        `;
+        expect(parseJavaForwardCompatibleEnum(source, "CreateAgentRequest")).toEqual([]);
+    });
+
+    test("ignores `public static final` constants whose type doesn't match the outer class", () => {
+        // A regular request class can legally nest unrelated constants
+        // (e.g. inside a Builder). Without the className filter the
+        // outer class would be misclassified as an enum.
+        const source = `
+            public final class CreateAgentRequest {
+                public static final String DEFAULT_NAME = new String("alice");
+            }
+        `;
+        expect(parseJavaForwardCompatibleEnum(source, "CreateAgentRequest")).toEqual([]);
+    });
+});
+
 describe("parseJavaEnumValues", () => {
     test("captures constant-name / wire-value pairs from Fern enum constructors", () => {
         // Both halves are needed: the wire value (`assistant`) matches the
@@ -1854,11 +1894,23 @@ describe("Java parser (rich schema fixture)", () => {
             passthroughBody: true,
         });
         expect(fields[0].items?.kind).toBe("object");
-        const itemKeys = fields[0].items?.nested?.fields.map((f) => f.jsonKey) ?? [];
-        expect(itemKeys).toEqual(["op", "path", "value"]);
+        const itemFields = fields[0].items?.nested?.fields ?? [];
+        expect(itemFields.map((f) => f.jsonKey)).toEqual(["op", "path", "value"]);
         expect(fields[0].items?.nested?.wrap).toBe(
             "JsonPatchOperation.builder(){{__body__}}.build()",
         );
+        // `op` is typed as JsonPatchOperationOp (Fern's forward-compatible
+        // enum) — must render as `JsonPatchOperationOp.<CONSTANT>`, not via
+        // a `.builder()...build()` chain (the class has no builder).
+        const opField = itemFields[0];
+        expect(opField).toMatchObject({ jsonKey: "op", kind: "enum", required: true });
+        expect(opField.enumValues).toEqual(["add", "remove", "replace"]);
+        expect(opField.enumConstants).toEqual({
+            add: "JsonPatchOperationOp.ADD",
+            remove: "JsonPatchOperationOp.REMOVE",
+            replace: "JsonPatchOperationOp.REPLACE",
+        });
+        expect(opField.nested).toBeUndefined();
     });
 
     test("synthesizes a passthrough object body for Jackson discriminated-union request types", () => {

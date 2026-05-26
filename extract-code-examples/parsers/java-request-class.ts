@@ -314,6 +314,19 @@ export function parseJavaClass(filePath: string): JavaClassInfo | null {
         };
     }
 
+    const forwardCompatible = parseJavaForwardCompatibleEnum(source, className);
+    if (forwardCompatible.length > 0) {
+        return {
+            className,
+            filePath,
+            fields: [],
+            requiredOrder: [],
+            imports,
+            ignoredFields: new Set(),
+            enumConstants: forwardCompatible,
+        };
+    }
+
     const fields = parseJavaFieldDeclarations(source);
     const jsonKeyByField = parseJavaJsonProperties(source);
     for (const f of fields) {
@@ -466,6 +479,25 @@ export function parseJavaEnumValues(source: string): JavaEnumConstant[] {
         out.push({ constantName: m[1], wireValue: m[2] ?? m[1] });
     }
     return out;
+}
+
+// Detect Fern's forward-compatible enum: a `public final class X` whose body
+// declares `public static final X CONSTANT = new X(..., "wire");` for each
+// variant. Fern uses this shape (instead of a plain Java enum) when the API
+// contract may grow new variants the SDK doesn't yet know about; the class
+// exposes no `builder()`, only static constants and `valueOf(String)`. The
+// `className` filter keeps us from misclassifying a regular request class
+// that happens to nest unrelated `public static final` constants of some
+// other type.
+const JAVA_FORWARD_COMPATIBLE_ENUM_RE =
+    /public\s+static\s+final\s+(\w+)\s+(\w+)\s*=\s*new\s+\1\s*\([^)]*?"([^"]+)"\s*\)\s*;/g;
+export function parseJavaForwardCompatibleEnum(source: string, className: string): JavaEnumConstant[] {
+    const constants: JavaEnumConstant[] = [];
+    for (const m of source.matchAll(JAVA_FORWARD_COMPATIBLE_ENUM_RE)) {
+        if (m[1] !== className) continue;
+        constants.push({ constantName: m[2], wireValue: m[3] });
+    }
+    return constants;
 }
 
 // Parse `import com.x.Y;` lines from a Java source file into a short→FQN

@@ -161,6 +161,7 @@ export {
     parseJavaClass,
     parseJavaEnumValues,
     parseJavaFieldDeclarations,
+    parseJavaForwardCompatibleEnum,
     parseJavaJsonIgnoredFields,
     parseJavaJsonProperties,
     parseJavaStagedBuilderOrder,
