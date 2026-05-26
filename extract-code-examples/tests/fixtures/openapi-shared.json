@@ -127,6 +127,26 @@
         }
       }
     },
+    "/agent/{id}/patch-with-filter": {
+      "patch": {
+        "parameters": [
+          { "$ref": "#/components/parameters/agent_IdParam" },
+          { "name": "verbose", "in": "query", "required": false, "schema": { "type": "boolean" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json+patch": {
+              "schema": {
+                "type": "array",
+                "items": { "type": "object", "properties": { "op": { "type": "string" } } }
+              },
+              "example": [{ "op": "add", "path": "/name", "value": "x" }]
+            }
+          }
+        },
+        "responses": { "204": { "description": "OK" } }
+      }
+    },
     "/agent/{id}/comments/{comment_id}": {
       "parameters": [
         { "$ref": "#/components/parameters/agent_IdParam" },

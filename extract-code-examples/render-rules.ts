@@ -59,13 +59,25 @@ export function buildRenderSchema(
         // Fern emits a single call signature for both. Append them so the
         // rendered call gets `client.X.list(tag="...")` for a query-only
         // endpoint and `client.X.create(name="...", tag="...")` for combined.
-        const queryFields = spec.queryParams.map((p) =>
-            buildField(p.name, p.schema ?? {}, p.required === true, language),
-        );
-        if (body) {
-            body = { ...body, fields: [...body.fields, ...queryFields] };
+        //
+        // Exception: a passthrough body (e.g. a JSON Patch array as the wire
+        // payload) can't take named-field neighbors — the rendered call would
+        // emit `{ [...patches...], "tags": "..." }` which isn't valid TS or
+        // Python syntax. Real Fern doesn't generate this combination today;
+        // if it ever does, the warning surfaces it for investigation.
+        if (body && isPassthroughBody(body)) {
+            console.error(
+                `  WARNING: endpoint ${spec.httpMethod} ${spec.httpPath} has a passthrough body ` +
+                `and ${spec.queryParams.length} query parameter(s) — query params dropped from render. ` +
+                `Fern doesn't generate this combination; verify the spec or extend render-rules.ts if it's intentional.`,
+            );
         } else {
-            body = { fieldSeparator: separatorFor(language), fields: queryFields };
+            const queryFields = spec.queryParams.map((p) =>
+                buildField(p.name, p.schema ?? {}, p.required === true, language),
+            );
+            body = body
+                ? { ...body, fields: [...body.fields, ...queryFields] }
+                : { fieldSeparator: separatorFor(language), fields: queryFields };
         }
     }
 

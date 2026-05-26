@@ -98,7 +98,7 @@ describe("loadSpec", () => {
 
     test("loads endpoints from the fixture spec", () => {
         const endpoints = loadSpec(specPath);
-        expect(endpoints.length).toBe(9);
+        expect(endpoints.length).toBe(10);
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /agent/{id}",
@@ -106,6 +106,7 @@ describe("loadSpec", () => {
             "GET /agent/{id}",
             "GET /agent/{id}/comments/{comment_id}",
             "PATCH /agent/{id}/comments/{comment_id}",
+            "PATCH /agent/{id}/patch-with-filter",
             "POST /agent/create",
             "POST /agent/dual-content",
             "POST /agent/stream",
@@ -535,6 +536,23 @@ describe("buildRenderSchema", () => {
             // softly with a clear "unknown identifier" error).
             expect(scope?.enumConstants).toBeUndefined();
         }
+    });
+
+    test("passthrough body + query params: query is dropped (rather than corrupting the body slot)", () => {
+        // PATCH /agent/{id}/patch-with-filter has a JSON Patch array body
+        // (passthrough) AND a `verbose` query param. Appending the query
+        // field would make `isPassthroughBody` false and produce broken
+        // `{ [...], "verbose": true }` syntax in TS. Fixture asserts the
+        // body stays passthrough; query is logged as a warning but dropped.
+        const patch = findSpec("PATCH", "/agent/{id}/patch-with-filter");
+        const render = buildRenderSchema(patch, {
+            httpMethod: "PATCH", httpPath: "/agent/{id}/patch-with-filter",
+            methodChain: ["agent", "patch"], methodName: "patch",
+        }, "typescript");
+        expect(render.body?.fields.length).toBe(1);
+        expect(render.body?.fields[0].passthroughBody).toBe(true);
+        // callTemplate uses the bare body slot (no `{ ... }` wrap).
+        expect(render.callTemplate).toBe("client.agent.patch({{id}}, {{__body__}})");
     });
 
     test("type:object + oneOf with no properties emits a passthrough body (not an empty fields list)", () => {
