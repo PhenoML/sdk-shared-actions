@@ -130,10 +130,13 @@ function javaBuilderWrap(className: string): string {
 }
 
 function buildBodySchema(schema: ResolvedSchema, language: Language): BodySchema {
-    // Non-object root: type-alias to an array / scalar / union. The wire body
-    // IS the value; we synthesize a single passthrough field so consumers can
-    // still render the example without dispatching on schema shape.
-    if (schema.type !== "object" && !schema.properties) {
+    // No named properties to iterate — synthesize a passthrough field so the
+    // consumer can render the curated example without per-key templates.
+    // Covers (a) non-object roots (array, scalar), (b) top-level `oneOf`
+    // discriminated unions with no wrapping object, and (c) `type: "object"`
+    // schemas that carry `oneOf`/`anyOf` instead of declared properties.
+    const properties = schema.properties ?? {};
+    if (Object.keys(properties).length === 0) {
         const kind = inferKind(schema);
         const field: SchemaField = {
             jsonKey: "",
@@ -149,7 +152,6 @@ function buildBodySchema(schema: ResolvedSchema, language: Language): BodySchema
     }
 
     const required = new Set(schema.required ?? []);
-    const properties = schema.properties ?? {};
     const fields: SchemaField[] = [];
 
     // Required first (Java staged builders enforce this; TS/Python adopt the

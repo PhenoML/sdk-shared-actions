@@ -98,7 +98,7 @@ describe("loadSpec", () => {
 
     test("loads endpoints from the fixture spec", () => {
         const endpoints = loadSpec(specPath);
-        expect(endpoints.length).toBe(6);
+        expect(endpoints.length).toBe(7);
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /agent/{id}",
@@ -107,6 +107,7 @@ describe("loadSpec", () => {
             "POST /agent/create",
             "POST /agent/dual-content",
             "POST /agent/stream",
+            "POST /agent/union",
         ]);
     });
 
@@ -466,6 +467,19 @@ describe("buildRenderSchema", () => {
         const order = render.body!.fields.map((f) => f.jsonKey);
         // Required: name, role (spec order). Optional: description, provider, tag.
         expect(order).toEqual(["name", "role", "description", "provider", "tag"]);
+    });
+
+    test("type:object + oneOf with no properties emits a passthrough body (not an empty fields list)", () => {
+        const union = findSpec("POST", "/agent/union");
+        for (const language of ["python", "typescript", "java"] as const) {
+            const render = buildRenderSchema(union, {
+                httpMethod: "POST", httpPath: "/agent/union",
+                methodChain: ["agent", "union"], methodName: "union",
+                requestClassName: "AgentUnionRequest",
+            }, language);
+            expect(render.body?.fields.length).toBe(1);
+            expect(render.body?.fields[0].passthroughBody).toBe(true);
+        }
     });
 
     test("nested object fields: TS gets `nested` with `{ ... }` wrap, Java with builder wrap, Python falls back to untyped", () => {

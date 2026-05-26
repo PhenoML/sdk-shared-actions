@@ -95,13 +95,34 @@
             "description": "Streaming endpoint with a placeholder JSON content type alongside SSE.",
             "content": {
               "application/json": {
-                "example": { "placeholder": true }
+                "example": { "delta": "..." }
               },
               "text/event-stream": {
                 "example": { "delta": "..." }
               }
             }
           }
+        }
+      }
+    },
+    "/agent/union": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "oneOf": [
+                  { "$ref": "#/components/schemas/agent_AgentRole" },
+                  { "$ref": "#/components/schemas/fhir_provider_Provider" }
+                ]
+              },
+              "example": "assistant"
+            }
+          }
+        },
+        "responses": {
+          "200": { "content": { "application/json": { "example": { "ok": true } } } }
         }
       }
     }
