@@ -106,7 +106,8 @@
           "name": { "type": "string" },
           "description": { "type": "string" },
           "role": { "$ref": "#/components/schemas/agent_AgentRole" },
-          "provider": { "$ref": "#/components/schemas/fhir_provider_Provider" }
+          "provider": { "$ref": "#/components/schemas/fhir_provider_Provider" },
+          "tag": { "$ref": "#/components/schemas/agent_Tag" }
         }
       },
       "agent_AgentRole": {
@@ -116,6 +117,14 @@
       "fhir_provider_Provider": {
         "type": "string",
         "enum": ["epic", "google_healthcare"]
+      },
+      "agent_Tag": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "color": { "type": "string" }
+        }
       },
       "agent_AgentResponse": {
         "type": "object",

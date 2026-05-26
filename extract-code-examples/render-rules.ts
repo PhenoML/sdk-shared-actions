@@ -191,7 +191,7 @@ function buildListItemField(items: ResolvedSchema, language: Language): SchemaFi
     }, items, language);
 }
 
-// Fills in kind-specific extras (items, enum values, Java nested envelope) on
+// Fills in kind-specific extras (items, enum values, nested sub-schemas) on
 // a freshly-built field. Shared by buildField and buildListItemField since
 // the descent rules are identical — only the seed (`jsonKey`/`fieldTemplate`)
 // differs.
@@ -204,11 +204,16 @@ function populateNested(field: SchemaField, prop: ResolvedSchema, language: Lang
     if (field.kind === "list" && prop.items) {
         field.items = buildListItemField(prop.items, language);
     }
-    if (field.kind === "object" && language === "java" && prop.$refName && prop.properties) {
-        // Java needs an inline-render envelope on every nested type so list
-        // items / nested fields produce valid builder code.
+    // Populate `nested` for $ref'd object types in every language that uses
+    // it. Python is excluded by README contract — nested objects there render
+    // as untyped dict literals — so omitting `nested` is the documented
+    // signal. Java needs a builder envelope on the wrap; TS needs a `{ ... }`
+    // envelope so list items and nested fields produce valid object literals.
+    if (field.kind === "object" && prop.$refName && prop.properties && language !== "python") {
         const nested = buildBodySchema(prop, language);
-        nested.wrap = javaBuilderWrap(stripSchemaPrefix(prop.$refName));
+        nested.wrap = language === "java"
+            ? javaBuilderWrap(stripSchemaPrefix(prop.$refName))
+            : "{ {{__body__}} }";
         field.nested = nested;
     }
     return field;

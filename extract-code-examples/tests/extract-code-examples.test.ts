@@ -454,8 +454,40 @@ describe("buildRenderSchema", () => {
             methodChain: ["agent", "create"], methodName: "create",
         }, "python");
         const order = render.body!.fields.map((f) => f.jsonKey);
-        // Required: name, role (spec order). Optional: description, provider.
-        expect(order).toEqual(["name", "role", "description", "provider"]);
+        // Required: name, role (spec order). Optional: description, provider, tag.
+        expect(order).toEqual(["name", "role", "description", "provider", "tag"]);
+    });
+
+    test("nested object fields: TS gets `nested` with `{ ... }` wrap, Java with builder wrap, Python falls back to untyped", () => {
+        const create = findSpec("POST", "/agent/create");
+
+        const ts = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+        }, "typescript");
+        const tagTs = ts.body?.fields.find((f) => f.jsonKey === "tag");
+        expect(tagTs?.kind).toBe("object");
+        expect(tagTs?.nested?.wrap).toBe("{ {{__body__}} }");
+        expect(tagTs?.nested?.fieldSeparator).toBe(", ");
+        expect(tagTs?.nested?.fields.map((f) => f.jsonKey)).toEqual(["name", "color"]);
+        expect(tagTs?.nested?.fields[0].fieldTemplate).toBe(`"name": {{value}}`);
+
+        const java = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+            requestClassName: "AgentCreateRequest",
+        }, "java");
+        const tagJava = java.body?.fields.find((f) => f.jsonKey === "tag");
+        expect(tagJava?.nested?.wrap).toBe("Tag.builder(){{__body__}}.build()");
+        expect(tagJava?.nested?.fields[0].fieldTemplate).toBe(".name({{value}})");
+
+        const py = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+        }, "python");
+        const tagPy = py.body?.fields.find((f) => f.jsonKey === "tag");
+        // Python: untyped fallback — README contract; consumer renders as dict literal.
+        expect(tagPy?.nested).toBeUndefined();
     });
 
     test("GET endpoint with only query params produces a body schema of those params", () => {
