@@ -12,6 +12,7 @@ import {
     normalizePath,
     normalizePathParams,
     pascalCase,
+    resolveSpecPath,
     snakeToCamel,
 } from "../index";
 import { javaBuildAccessorMap, javaDeriveMethodChain, javaExtractEndpoints } from "../parsers/java";
@@ -61,6 +62,25 @@ describe("case conversion helpers", () => {
     });
     test("pascalCase handles kebab too", () => {
         expect(pascalCase("client-secret")).toBe("ClientSecret");
+    });
+});
+
+describe("resolveSpecPath override handling", () => {
+    test("relative override resolves against rootDir, not process cwd", () => {
+        const root = path.join(FIXTURES, "python");
+        const resolved = resolveSpecPath(root, "python", "src/phenoml/openapi/openapi.json");
+        expect(resolved).toBe(path.join(root, "src/phenoml/openapi/openapi.json"));
+    });
+
+    test("absolute override is taken verbatim", () => {
+        const absolute = path.join(FIXTURES, "openapi-shared.json");
+        expect(resolveSpecPath("/some/unrelated/root", "python", absolute)).toBe(absolute);
+    });
+
+    test("no override falls back to the per-language default under rootDir", () => {
+        const root = path.join(FIXTURES, "python");
+        const resolved = resolveSpecPath(root, "python");
+        expect(resolved).toBe(path.join(root, "src/phenoml/openapi/openapi.json"));
     });
 });
 

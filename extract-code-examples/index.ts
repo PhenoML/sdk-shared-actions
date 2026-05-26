@@ -61,7 +61,18 @@ function parseArgs(): Args {
     return out;
 }
 
-function resolveSpecPath(rootDir: string, language: Language): string {
+export function resolveSpecPath(
+    rootDir: string,
+    language: Language,
+    override?: string,
+): string {
+    // Honor an explicit `--spec` / `inputs.spec`. Relative overrides resolve
+    // against `rootDir` (matching how README and action.yml describe the spec
+    // as living under the SDK root); absolute paths are taken verbatim. Both
+    // path.resolve branches do the right thing — its semantics: absolute
+    // arg wins, relative arg is joined onto the preceding base.
+    if (override) return path.resolve(rootDir, override);
+
     // Python's bundle path includes the package name (e.g. src/phenoml/openapi/...).
     const pkgDir = findPythonPackageDir(rootDir) ?? "phenoml";
     for (const candidate of DEFAULT_SPEC_PATHS[language]) {
@@ -96,7 +107,7 @@ async function main() {
         throw new Error("No .fern/metadata.json found and no --language specified");
     }
 
-    const specPath = specPathOverride ?? resolveSpecPath(rootDir, language);
+    const specPath = resolveSpecPath(rootDir, language, specPathOverride);
     console.error(`Language: ${language} (${metadata.generatorName})`);
     console.error(`Spec:     ${specPath}\n`);
 
