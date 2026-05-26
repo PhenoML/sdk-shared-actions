@@ -1,27 +1,25 @@
-/**
- * Synthetic fixture: mirrors the real Fern-generated JsonPatchOperation
- * class. The class IS a regular Fern request-class shape (staged
- * builder, @JsonProperty getters) so the list-passthrough item
- * resolution recurses into its field catalog (op, path, value).
- */
+// Synthetic fixture: regular Fern request-class shape (staged builder,
+// @JsonProperty getters). The `op` field's type is JsonPatchOperationOp —
+// a forward-compatible enum — so list-passthrough item resolution must
+// classify it as `kind: "enum"`, not recurse into a builder.
 package com.phenoml.api.resources.agent.types;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.Optional;
 
 public final class JsonPatchOperation {
-    private final String op;
+    private final JsonPatchOperationOp op;
     private final String path;
     private final Optional<Object> value;
 
-    private JsonPatchOperation(String op, String path, Optional<Object> value) {
+    private JsonPatchOperation(JsonPatchOperationOp op, String path, Optional<Object> value) {
         this.op = op;
         this.path = path;
         this.value = value;
     }
 
     @JsonProperty("op")
-    public String getOp() {
+    public JsonPatchOperationOp getOp() {
         return op;
     }
 
@@ -40,7 +38,7 @@ public final class JsonPatchOperation {
     }
 
     public interface OpStage {
-        PathStage op(String op);
+        PathStage op(JsonPatchOperationOp op);
     }
 
     public interface PathStage {
@@ -54,12 +52,12 @@ public final class JsonPatchOperation {
     }
 
     private static final class Builder implements OpStage, PathStage, _FinalStage {
-        private String op;
+        private JsonPatchOperationOp op;
         private String path;
         private Optional<Object> value = Optional.empty();
 
         @Override
-        public PathStage op(String op) {
+        public PathStage op(JsonPatchOperationOp op) {
             this.op = op;
             return this;
         }
