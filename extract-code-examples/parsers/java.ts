@@ -157,22 +157,75 @@ export function javaExtractEndpoints(
     return endpoints;
 }
 
-// First non-RequestOptions, non-primitive parameter type is the body class.
-// Returns undefined for path-only methods (just `String id, RequestOptions`).
-function javaExtractRequestClassName(paramList: string): string | undefined {
-    for (const raw of paramList.split(",")) {
-        const trimmed = raw.trim();
-        if (!trimmed) continue;
-        const m = trimmed.match(/^([\w.<>?\s]+?)\s+\w+\s*$/);
-        if (!m) continue;
-        const type = m[1].trim();
-        if (type === "RequestOptions") continue;
-        if (type === "String" || type === "int" || type === "long" || type === "double" ||
-            type === "float" || type === "boolean" || type === "char" || type === "byte" ||
-            type === "short" || type.startsWith("Optional<")) continue;
-        return type.replace(/[<>?\s]+/g, "");
+// Java scalars and common wrapper types that show up as path/query params.
+// Picking one of these as the request class would emit `UUID.builder()...`
+// or `Integer.builder()...` in the callTemplate, which doesn't compile.
+const JAVA_SCALAR_PARAM_TYPES = new Set([
+    "String", "int", "long", "double", "float", "boolean", "char", "byte", "short",
+    "Integer", "Long", "Double", "Float", "Boolean", "Character", "Byte", "Short",
+    "UUID", "BigDecimal", "BigInteger",
+    "LocalDate", "LocalDateTime", "LocalTime",
+    "OffsetDateTime", "OffsetTime", "Instant", "ZonedDateTime",
+    "Duration", "Period", "URI", "URL",
+]);
+
+// Fern Java puts the request body LAST, immediately before any trailing
+// `RequestOptions`. Look there; return undefined when the spot is a path
+// param (scalar/wrapper type) or a passthrough body (`List<...>` etc. —
+// those render through the spec's `passthroughBody` flag, not a builder).
+// `Optional<XxxRequest>` unwraps to `XxxRequest`.
+export function javaExtractRequestClassName(paramList: string): string | undefined {
+    const params = splitJavaParams(paramList);
+    while (params.length > 0 && paramType(params[params.length - 1]) === "RequestOptions") {
+        params.pop();
     }
-    return undefined;
+    if (params.length === 0) return undefined;
+    const raw = paramType(params[params.length - 1]);
+    if (!raw) return undefined;
+
+    const candidate = unwrapOptional(raw) ?? raw;
+    if (JAVA_SCALAR_PARAM_TYPES.has(candidate)) return undefined;
+    if (isCollectionType(candidate)) return undefined;
+    // Strip generic parameters if any survived — the builder is on the raw
+    // class (`Foo.builder()`, not `Foo<Bar>.builder()`).
+    return candidate.replace(/<.*$/, "").trim();
+}
+
+// Splits a Java parameter list on top-level commas, respecting `<...>`,
+// `(...)`, and `[...]` nesting so types like `Map<String, Object> arg`
+// aren't fractured at the comma inside the generic.
+function splitJavaParams(s: string): string[] {
+    const out: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (c === "<" || c === "(" || c === "[") depth++;
+        else if (c === ">" || c === ")" || c === "]") depth--;
+        else if (c === "," && depth === 0) {
+            const piece = s.slice(start, i).trim();
+            if (piece) out.push(piece);
+            start = i + 1;
+        }
+    }
+    const tail = s.slice(start).trim();
+    if (tail) out.push(tail);
+    return out;
+}
+
+// "`AgentCreateRequest request`" → "`AgentCreateRequest`".
+function paramType(param: string): string | undefined {
+    const m = param.match(/^(.+)\s+\w+\s*$/);
+    return m ? m[1].trim() : undefined;
+}
+
+function unwrapOptional(t: string): string | undefined {
+    const m = t.match(/^Optional\s*<\s*(.+)\s*>$/);
+    return m ? m[1].trim() : undefined;
+}
+
+function isCollectionType(t: string): boolean {
+    return /^(?:List|Set|Collection|Iterable|Map)\s*</.test(t);
 }
 
 function javaExtractPathAndMethod(body: string): { method: string; path: string } | null {

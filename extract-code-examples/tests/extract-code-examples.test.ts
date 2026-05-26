@@ -15,7 +15,12 @@ import {
     resolveSpecPath,
     snakeToCamel,
 } from "../index";
-import { javaBuildAccessorMap, javaDeriveMethodChain, javaExtractEndpoints } from "../parsers/java";
+import {
+    javaBuildAccessorMap,
+    javaDeriveMethodChain,
+    javaExtractEndpoints,
+    javaExtractRequestClassName,
+} from "../parsers/java";
 import { pyDeriveMethodChain, pyExtractEndpoints } from "../parsers/python";
 import { tsExtractEndpoints } from "../parsers/typescript";
 
@@ -207,8 +212,11 @@ describe("javaExtractEndpoints", () => {
             "DELETE /agent/{id}",
             "GET /agent/list",
             "GET /agent/{id}",
+            "PATCH /agent/{id}",
             "POST /agent/create",
+            "POST /agent/fetch",
             "POST /agent/stream",
+            "PUT /agent/by-uuid/{id}",
         ]);
     });
 
@@ -221,6 +229,30 @@ describe("javaExtractEndpoints", () => {
         // No body → no request class
         const get = endpoints.find((e) => e.httpMethod === "GET" && e.httpPath === "/agent/{id}");
         expect(get?.requestClassName).toBeUndefined();
+    });
+
+    test("List<...> passthrough body yields no request class (not 'ListXxx')", () => {
+        const file = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources/agent/RawAgentClient.java");
+        const resourcesDir = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources");
+        const endpoints = javaExtractEndpoints(file, resourcesDir);
+        const patch = endpoints.find((e) => e.httpMethod === "PATCH" && e.httpPath === "/agent/{id}");
+        expect(patch?.requestClassName).toBeUndefined();
+    });
+
+    test("wrapper-typed path param doesn't shadow the trailing body class", () => {
+        const file = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources/agent/RawAgentClient.java");
+        const resourcesDir = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources");
+        const endpoints = javaExtractEndpoints(file, resourcesDir);
+        const update = endpoints.find((e) => e.httpMethod === "PUT" && e.httpPath === "/agent/by-uuid/{id}");
+        expect(update?.requestClassName).toBe("AgentUpdateRequest");
+    });
+
+    test("Optional<XxxRequest> body unwraps to XxxRequest", () => {
+        const file = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources/agent/RawAgentClient.java");
+        const resourcesDir = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources");
+        const endpoints = javaExtractEndpoints(file, resourcesDir);
+        const fetch = endpoints.find((e) => e.httpMethod === "POST" && e.httpPath === "/agent/fetch");
+        expect(fetch?.requestClassName).toBe("FetchRequest");
     });
 
     test("stops path collection at first .build() — streaming endpoints have two newBuilder() calls", () => {
@@ -236,6 +268,51 @@ describe("javaExtractEndpoints", () => {
             "/x/resources/agent/RawAgentClient.java",
             "/x/resources",
         )).toEqual(["agent"]);
+    });
+});
+
+describe("javaExtractRequestClassName unit cases", () => {
+    test("body class (no path/options trailing)", () => {
+        expect(javaExtractRequestClassName("AgentCreateRequest request"))
+            .toBe("AgentCreateRequest");
+    });
+    test("trailing RequestOptions is ignored", () => {
+        expect(javaExtractRequestClassName("AgentCreateRequest request, RequestOptions requestOptions"))
+            .toBe("AgentCreateRequest");
+    });
+    test("path-only method (String id)", () => {
+        expect(javaExtractRequestClassName("String id, RequestOptions requestOptions")).toBeUndefined();
+    });
+    test("wrapper path types are also recognized as scalars", () => {
+        expect(javaExtractRequestClassName("UUID id, RequestOptions requestOptions")).toBeUndefined();
+        expect(javaExtractRequestClassName("Integer count")).toBeUndefined();
+        expect(javaExtractRequestClassName("LocalDateTime when, RequestOptions requestOptions")).toBeUndefined();
+    });
+    test("mixed path + body picks the body class, not the path scalar", () => {
+        expect(javaExtractRequestClassName("UUID id, AgentUpdateRequest request, RequestOptions requestOptions"))
+            .toBe("AgentUpdateRequest");
+        expect(javaExtractRequestClassName("String id, AgentUpdateRequest request"))
+            .toBe("AgentUpdateRequest");
+    });
+    test("List<...> body is a passthrough — no builder class", () => {
+        expect(javaExtractRequestClassName("String id, List<JsonPatchOperation> request")).toBeUndefined();
+        expect(javaExtractRequestClassName("String id, List<JsonPatchOperation> request, RequestOptions requestOptions"))
+            .toBeUndefined();
+    });
+    test("Optional<XxxRequest> body unwraps", () => {
+        expect(javaExtractRequestClassName("Optional<FetchRequest> request"))
+            .toBe("FetchRequest");
+        expect(javaExtractRequestClassName("Optional<FetchRequest> request, RequestOptions requestOptions"))
+            .toBe("FetchRequest");
+    });
+    test("nested-generic param type doesn't trip the top-level comma split", () => {
+        // Map<String, Object> contains a comma at depth 1 — splitter must
+        // keep it in one piece.
+        expect(javaExtractRequestClassName("String id, Map<String, Object> request"))
+            .toBeUndefined(); // Map<...> → collection-typed passthrough
+    });
+    test("empty param list (no-arg method)", () => {
+        expect(javaExtractRequestClassName("")).toBeUndefined();
     });
 });
 

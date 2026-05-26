@@ -81,4 +81,48 @@ public class RawAgentClient {
                 .build();
         return null;
     }
+
+    // `List<JsonPatchOperation>` body — the request class extractor must
+    // return undefined (passthrough body), NOT "ListJsonPatchOperation".
+    public PhenoMLHttpResponse<AgentResponse> patch(String id, List<JsonPatchOperation> request) {
+        return patch(id, request, null);
+    }
+    public PhenoMLHttpResponse<AgentResponse> patch(String id, List<JsonPatchOperation> request, RequestOptions requestOptions) {
+        HttpUrl httpUrl = HttpUrl.parse("https://example").newBuilder()
+                .addPathSegments("agent")
+                .addPathSegment(id)
+                .build();
+        Request okhttpRequest = new Request.Builder()
+                .url(httpUrl)
+                .method("PATCH", null)
+                .build();
+        return null;
+    }
+
+    // Mixed path+body where the path param uses a wrapper type — the
+    // extractor must pick the *last* non-RequestOptions param, not the first
+    // non-primitive one (which would mis-select `UUID`).
+    public PhenoMLHttpResponse<AgentResponse> updateByUuid(UUID id, AgentUpdateRequest request, RequestOptions requestOptions) {
+        HttpUrl httpUrl = HttpUrl.parse("https://example").newBuilder()
+                .addPathSegments("agent/by-uuid")
+                .addPathSegment(id)
+                .build();
+        Request okhttpRequest = new Request.Builder()
+                .url(httpUrl)
+                .method("PUT", null)
+                .build();
+        return null;
+    }
+
+    // `Optional<XxxRequest>` body — extractor must unwrap to `XxxRequest`.
+    public PhenoMLHttpResponse<AgentResponse> fetchAgent(Optional<FetchRequest> request, RequestOptions requestOptions) {
+        HttpUrl httpUrl = HttpUrl.parse("https://example").newBuilder()
+                .addPathSegments("agent/fetch")
+                .build();
+        Request okhttpRequest = new Request.Builder()
+                .url(httpUrl)
+                .method("POST", null)
+                .build();
+        return null;
+    }
 }
