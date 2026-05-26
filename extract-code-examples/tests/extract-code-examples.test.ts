@@ -357,15 +357,20 @@ describe("buildRenderSchema", () => {
         expect(render.body?.fields[0].fieldTemplate).toBe(`"name": {{value}}`);
     });
 
-    test("Java: query-only endpoint without a detected request class drops body (no invalid `list(.tags(...))` output)", () => {
+    test("Java: query-only endpoint without a detected request class — callTemplate omits body slot but body.fields are preserved for documentation", () => {
         const list = findSpec("GET", "/agent/list");
         const render = buildRenderSchema(list, {
             httpMethod: "GET", httpPath: "/agent/list",
             methodChain: ["agent", "list"], methodName: "list",
             // requestClassName intentionally absent — defensive guard fires.
         }, "java");
+        // No `{{__body__}}` in callTemplate → naïve consumer renders valid Java.
         expect(render.callTemplate).toBe("client.agent().list()");
-        expect(render.body).toBeUndefined();
+        // `body` is still surfaced so consumers (docs, richer renderers) can
+        // see the field catalog the spec declares — matches Python/TS.
+        expect(render.body?.fields).toEqual([
+            { jsonKey: "tags", fieldTemplate: ".tags({{value}})", kind: "string", required: false },
+        ]);
     });
 
     test("Java: builder envelope + fluent setters with snake_case→camelCase", () => {

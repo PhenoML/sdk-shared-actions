@@ -70,20 +70,23 @@ export function buildRenderSchema(
     }
 
     // Java needs a request class to accept body/query fields — `list(.tags(...))`
-    // doesn't compile. If we somehow have fields but no detected class, drop
-    // the body so the rendered call falls back to the no-arg overload rather
-    // than emitting invalid Java. (Real Fern Java always generates a request
-    // class for query-param endpoints, so this guard only fires on a parser
-    // miss or unusual codegen.)
-    if (language === "java" && body && !isPassthroughBody(body) && !mapping.requestClassName) {
+    // doesn't compile. If we have fields but no detected class, surface the
+    // field catalog in `body` for documentation (matching the Python/TS spec
+    // representation) but omit the `{{__body__}}` slot from the callTemplate
+    // so a naïve renderer produces a valid no-arg call instead of invalid
+    // Java. (Real Fern Java always generates a request class for query-param
+    // endpoints, so this guard only fires on a parser miss or unusual
+    // codegen — when it does, the warning calls it out.)
+    const javaBodyNotRenderable =
+        language === "java" && body !== undefined && !isPassthroughBody(body) && !mapping.requestClassName;
+    if (javaBodyNotRenderable) {
         console.error(
-            `  WARNING: Java endpoint ${mapping.methodChain.join(".")}.${mapping.methodName} ` +
-            `has body/query fields but no request class — dropping body from render`,
+            `  WARNING: Java endpoint ${mapping.methodChain.join(".")} ` +
+            `has body/query fields but no request class — call signature won't include them`,
         );
-        body = undefined;
     }
 
-    const callTemplate = buildCallTemplate(mapping, params, body, language);
+    const callTemplate = buildCallTemplate(mapping, params, javaBodyNotRenderable ? undefined : body, language);
 
     const schema: RenderSchema = { callTemplate, params };
     if (body) schema.body = body;
