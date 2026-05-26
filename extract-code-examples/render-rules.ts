@@ -260,10 +260,12 @@ function screamingSnake(value: string): string {
     return value.replace(/-/g, "_").toUpperCase();
 }
 
-// `agent_AgentRole` → `AgentRole`. Strips Fern's "resource_" prefix that the
-// spec uses to namespace schemas, leaving the bare type name a generator
-// would emit.
+// Strips Fern's snake_case resource prefix, leaving the bare PascalCase
+// class name a generator would emit. Multi-word resources matter:
+// `fhir_provider_Provider` → `Provider` (NOT `provider_Provider`); the
+// trailing PascalCase identifier is matched as a whole. Returns the input
+// unchanged when there's no `_PascalCase` suffix.
 function stripSchemaPrefix(refName: string): string {
-    const idx = refName.indexOf("_");
-    return idx >= 0 ? refName.slice(idx + 1) : refName;
+    const m = refName.match(/_([A-Z][A-Za-z0-9]*)$/);
+    return m ? m[1] : refName;
 }

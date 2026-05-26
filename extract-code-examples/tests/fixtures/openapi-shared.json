@@ -105,12 +105,17 @@
         "properties": {
           "name": { "type": "string" },
           "description": { "type": "string" },
-          "role": { "$ref": "#/components/schemas/agent_AgentRole" }
+          "role": { "$ref": "#/components/schemas/agent_AgentRole" },
+          "provider": { "$ref": "#/components/schemas/fhir_provider_Provider" }
         }
       },
       "agent_AgentRole": {
         "type": "string",
         "enum": ["assistant", "user", "system"]
+      },
+      "fhir_provider_Provider": {
+        "type": "string",
+        "enum": ["epic", "google_healthcare"]
       },
       "agent_AgentResponse": {
         "type": "object",

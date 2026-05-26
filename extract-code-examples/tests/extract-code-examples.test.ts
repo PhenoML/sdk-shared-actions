@@ -421,6 +421,32 @@ describe("buildRenderSchema", () => {
         });
     });
 
+    test("multi-word resource prefix is fully stripped from enum class names", () => {
+        // `fhir_provider_Provider` → `Provider` (NOT `provider_Provider`).
+        const create = findSpec("POST", "/agent/create");
+        const ts = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+        }, "typescript");
+        const provider = ts.body?.fields.find((f) => f.jsonKey === "provider");
+        expect(provider?.kind).toBe("enum");
+        expect(provider?.enumConstants).toEqual({
+            epic: "Provider.Epic",
+            google_healthcare: "Provider.GoogleHealthcare",
+        });
+
+        const java = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+            requestClassName: "AgentCreateRequest",
+        }, "java");
+        const providerJava = java.body?.fields.find((f) => f.jsonKey === "provider");
+        expect(providerJava?.enumConstants).toEqual({
+            epic: "Provider.EPIC",
+            google_healthcare: "Provider.GOOGLE_HEALTHCARE",
+        });
+    });
+
     test("required fields come before optional in the declared order", () => {
         const create = findSpec("POST", "/agent/create");
         const render = buildRenderSchema(create, {
@@ -428,8 +454,8 @@ describe("buildRenderSchema", () => {
             methodChain: ["agent", "create"], methodName: "create",
         }, "python");
         const order = render.body!.fields.map((f) => f.jsonKey);
-        // Required: name, role (spec order). Optional: description.
-        expect(order).toEqual(["name", "role", "description"]);
+        // Required: name, role (spec order). Optional: description, provider.
+        expect(order).toEqual(["name", "role", "description", "provider"]);
     });
 
     test("GET endpoint with only query params produces a body schema of those params", () => {
