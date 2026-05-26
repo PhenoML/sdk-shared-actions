@@ -50,7 +50,8 @@
     "/agent/list": {
       "get": {
         "parameters": [
-          { "name": "tags", "in": "query", "required": false, "schema": { "type": "string" } }
+          { "name": "tags", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "X-Trace-Id", "in": "header", "required": false, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -162,6 +163,10 @@
           "role": { "$ref": "#/components/schemas/agent_AgentRole" },
           "provider": { "$ref": "#/components/schemas/fhir_provider_Provider" },
           "tag": { "$ref": "#/components/schemas/agent_Tag" },
+          "tags": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/agent_Tag" }
+          },
           "scope": { "$ref": "#/components/schemas/agent_AgentChatRequest_Scope" }
         }
       },

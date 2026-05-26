@@ -136,4 +136,25 @@ public class RawAgentClient {
                 .build();
         return null;
     }
+
+    // Multi-line method signature (one param per line). Fern emits this shape
+    // for methods with three or more parameters; the previous parser broke on
+    // signatures spanning 3+ lines (see commit history, pre-spec rewrite).
+    public PhenoMLHttpResponse<AgentResponse> multiLine(
+            String id,
+            String tagId,
+            AgentUpdateRequest request,
+            RequestOptions requestOptions) {
+        HttpUrl httpUrl = HttpUrl.parse("https://example").newBuilder()
+                .addPathSegments("agent")
+                .addPathSegment(id)
+                .addPathSegments("tag")
+                .addPathSegment(tagId)
+                .build();
+        Request okhttpRequest = new Request.Builder()
+                .url(httpUrl)
+                .method("PATCH", null)
+                .build();
+        return null;
+    }
 }

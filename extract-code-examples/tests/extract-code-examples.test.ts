@@ -259,6 +259,7 @@ describe("javaExtractEndpoints", () => {
             "GET /agent/list",
             "GET /agent/{id}",
             "PATCH /agent/{id}",
+            "PATCH /agent/{id}/tag/{tag_id}",
             "POST /agent/create",
             "POST /agent/fetch",
             "POST /agent/stream",
@@ -299,6 +300,17 @@ describe("javaExtractEndpoints", () => {
         const endpoints = javaExtractEndpoints(file, resourcesDir);
         const fetch = endpoints.find((e) => e.httpMethod === "POST" && e.httpPath === "/agent/fetch");
         expect(fetch?.requestClassName).toBe("FetchRequest");
+    });
+
+    test("extracts a method whose signature spans 3+ lines (one param per line)", () => {
+        const file = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources/agent/RawAgentClient.java");
+        const resourcesDir = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources");
+        const endpoints = javaExtractEndpoints(file, resourcesDir);
+        const multi = endpoints.find((e) => e.methodName === "multiLine");
+        expect(multi).toBeDefined();
+        expect(multi?.httpMethod).toBe("PATCH");
+        expect(multi?.httpPath).toBe("/agent/{id}/tag/{tag_id}");
+        expect(multi?.requestClassName).toBe("AgentUpdateRequest");
     });
 
     test("stops path collection at first .build() — streaming endpoints have two newBuilder() calls", () => {
@@ -500,8 +512,8 @@ describe("buildRenderSchema", () => {
             methodChain: ["agent", "create"], methodName: "create",
         }, "python");
         const order = render.body!.fields.map((f) => f.jsonKey);
-        // Required: name, role (spec order). Optional: description, provider, tag, scope.
-        expect(order).toEqual(["name", "role", "description", "provider", "tag", "scope"]);
+        // Required: name, role (spec order). Optional: description, provider, tag, tags, scope.
+        expect(order).toEqual(["name", "role", "description", "provider", "tag", "tags", "scope"]);
     });
 
     test("ambiguous $refName (multiple PascalCase segments) omits enumConstants rather than guess", () => {
@@ -536,6 +548,39 @@ describe("buildRenderSchema", () => {
             expect(render.body?.fields.length).toBe(1);
             expect(render.body?.fields[0].passthroughBody).toBe(true);
         }
+    });
+
+    test("list of objects: items.nested is populated for TS/Java", () => {
+        const create = findSpec("POST", "/agent/create");
+        // `tags: Tag[]` — list whose items are a $ref'd object type.
+        const ts = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+        }, "typescript");
+        const tagsTs = ts.body?.fields.find((f) => f.jsonKey === "tags");
+        expect(tagsTs?.kind).toBe("list");
+        expect(tagsTs?.items?.kind).toBe("object");
+        expect(tagsTs?.items?.nested?.wrap).toBe("{ {{__body__}} }");
+        expect(tagsTs?.items?.nested?.fields.map((f) => f.jsonKey)).toEqual(["name", "color"]);
+
+        const java = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+            requestClassName: "AgentCreateRequest",
+        }, "java");
+        const tagsJava = java.body?.fields.find((f) => f.jsonKey === "tags");
+        expect(tagsJava?.items?.nested?.wrap).toBe("Tag.builder(){{__body__}}.build()");
+    });
+
+    test("header parameters are not surfaced as body fields", () => {
+        // `/agent/list` declares a `tags` query AND an `X-Trace-Id` header.
+        // Only the query travels in body.fields; headers are excluded.
+        const list = findSpec("GET", "/agent/list");
+        const render = buildRenderSchema(list, {
+            httpMethod: "GET", httpPath: "/agent/list",
+            methodChain: ["agent", "list"], methodName: "list",
+        }, "python");
+        expect(render.body?.fields.map((f) => f.jsonKey)).toEqual(["tags"]);
     });
 
     test("nested object fields: TS gets `nested` with `{ ... }` wrap, Java with builder wrap, Python falls back to untyped", () => {
@@ -639,6 +684,21 @@ describe("buildManifest end-to-end", () => {
             .toBe("client.agent.create({ {{__body__}} })");
     });
 
+    test("renderRules in the manifest carry language-appropriate literals", () => {
+        const spec = loadSpec(path.join(FIXTURES, "openapi-shared.json"));
+        const mappings = createPythonParser().parseEndpoints(path.join(FIXTURES, "python"));
+        const py = buildManifest(spec, mappings, "python", "phenoml", metadata);
+        expect(py.renderRules.trueLiteral).toBe("True");
+        expect(py.renderRules.nullLiteral).toBe("None");
+        expect(py.renderRules.listLiteral).toBe("[{{items}}]");
+
+        const java = buildManifest(spec, mappings, "java", "com.phenoml",
+            { ...metadata, generatorName: "fernapi/fern-java-sdk" });
+        expect(java.renderRules.trueLiteral).toBe("true");
+        expect(java.renderRules.nullLiteral).toBe("null");
+        expect(java.renderRules.listLiteral).toBe("Arrays.asList({{items}})");
+    });
+
     test("Java end-to-end", () => {
         const spec = loadSpec(path.join(FIXTURES, "openapi-shared.json"));
         const mappings = createJavaParser().parseEndpoints(path.join(FIXTURES, "java"));
@@ -656,10 +716,23 @@ describe("buildManifest end-to-end", () => {
 // ============================================================
 
 describe("javaBuildAccessorMap", () => {
-    test("returns an empty map when no top-level *Client.java files exist", () => {
+    test("maps resource directories to camelCase accessor method names", () => {
         const map = javaBuildAccessorMap(path.join(FIXTURES, "java/src/main/java"));
-        // The fixture only ships the Raw client (no `*Client.java` exposing
-        // an accessor), so the map is empty — chain falls back to the dir name.
-        expect(map.size).toBe(0);
+        // PhenomlClient declares `agent()` → agent dir (already matches name)
+        // and `fhirProvider()` → fhirprovider dir (lowercased dir, camelCase
+        // accessor). The map keys are absolute directory paths.
+        const entries = [...map.entries()].map(([dir, name]) => [path.basename(dir), name]);
+        expect(entries.sort()).toEqual([
+            ["agent", "agent"],
+            ["fhirprovider", "fhirProvider"],
+        ]);
+    });
+
+    test("javaDeriveMethodChain remaps lowercased dir to camelCase accessor when the map provides one", () => {
+        const map = javaBuildAccessorMap(path.join(FIXTURES, "java/src/main/java"));
+        const resourcesDir = path.join(FIXTURES, "java/src/main/java/com/phenoml/api/resources");
+        const fhirProvider = path.join(resourcesDir, "fhirprovider/RawFhirProviderClient.java");
+        const chain = javaDeriveMethodChain(fhirProvider, resourcesDir, map);
+        expect(chain).toEqual(["fhirProvider"]);
     });
 });
