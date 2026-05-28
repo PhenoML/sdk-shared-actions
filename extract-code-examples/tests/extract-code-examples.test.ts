@@ -268,6 +268,41 @@ describe("pyExtractEndpoints", () => {
             .toEqual(["tools", "mcp_server"]);
     });
 
+    test("plain-string path isn't shadowed by an `f\"` lookalike later in the call", () => {
+        // Regression: header dicts often contain
+        //   "X-Phenoml-On-Behalf-Of": str(phenoml_on_behalf_of) if ... else None,
+        // The `f"` at the end of `Of"` was matching the f-string regex,
+        // capturing the header value as the request path. Real f-string
+        // prefixes never follow an identifier char — the lookbehind fix
+        // anchors the regex accordingly.
+        const tmp = path.join(import.meta.dir, "tmp-py-header-fstring");
+        const pkg = path.join(tmp, "src/phenoml/agent");
+        fs.mkdirSync(pkg, { recursive: true });
+        fs.writeFileSync(
+            path.join(pkg, "raw_client.py"),
+            `class RawAgentClient:
+    def chat(self, *, message, phenoml_on_behalf_of=None, request_options=None):
+        _response = self._client_wrapper.httpx_client.request(
+            "agent/chat",
+            method="POST",
+            json={"message": message},
+            headers={
+                "content-type": "application/json",
+                "X-Phenoml-On-Behalf-Of": str(phenoml_on_behalf_of) if phenoml_on_behalf_of is not None else None,
+            },
+        )
+`,
+        );
+        try {
+            const mappings = createPythonParser().parseEndpoints(tmp);
+            const chat = mappings.find((m) => m.methodName === "chat");
+            expect(chat?.httpMethod).toBe("POST");
+            expect(chat?.httpPath).toBe("/agent/chat");
+        } finally {
+            fs.rmSync(tmp, { recursive: true, force: true });
+        }
+    });
+
     test("captures all entries in a `json={…}` literal that spans >30 source lines", () => {
         // Regression: an earlier 30-line cap in pyCollectCallText truncated
         // the call mid-dict, leaving the brace-matcher with an unbalanced
