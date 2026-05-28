@@ -141,8 +141,11 @@ function pyCollectCallText(lines: string[], startLine: number): string {
 
 function pyExtractRequestPath(callText: string): string | null {
     // f-string template: `f"agent/{jsonable_encoder(id)}"`. Strip the
-    // wrapper so the result is the bare `{id}` form the spec uses.
-    const fMatch = callText.match(/f"([^"]+)"/);
+    // wrapper so the result is the bare `{id}` form the spec uses. The
+    // lookbehind ensures `f` is a real string prefix and not the tail of
+    // an identifier — e.g. `"X-Phenoml-On-Behalf-Of": str(...)` ends with
+    // `f"` that would otherwise be mistaken for an f-string opening.
+    const fMatch = callText.match(/(?<![A-Za-z0-9_])f"([^"]+)"/);
     if (fMatch) return fMatch[1].replace(/\{\w+\((\w+)\)\}/g, "{$1}");
     // Plain string positional arg: the first string literal in the call.
     const simpleMatch = callText.match(/\(\s*"([^"]+)"\s*[,)]/);
