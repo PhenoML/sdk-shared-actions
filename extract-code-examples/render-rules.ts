@@ -10,7 +10,7 @@ import type {
     SchemaFieldKind,
     SpecEndpoint,
 } from "./types";
-import { pascalCase, screamingSnake, snakeToCamel, stripSchemaPrefix } from "./utils";
+import { camelToSnake, pascalCase, screamingSnake, snakeToCamel, stripSchemaPrefix } from "./utils";
 
 export const RENDER_RULES_BY_LANGUAGE: Record<Language, RenderRules> = {
     typescript: {
@@ -135,7 +135,15 @@ function bodySlotFor(body: BodySchema, language: Language, requestClassName: str
     // A passthrough body's value IS the whole wire body (a JSON Patch array,
     // for example). Wrapping it in `{ ... }` (TS) or `RequestClass.builder()`
     // (Java) would emit invalid code; both fall back to bare `{{__body__}}`.
-    if (isPassthroughBody(body)) return "{{__body__}}";
+    //
+    // Python is the exception: Fern's Python SDK takes the whole wire body as
+    // a `request=` kwarg, so the bare body would either chain a positional
+    // after kwargs (`method(id="x", [...])` — invalid Python) or drop the
+    // required parameter entirely. Emit `request={{__body__}}` to match the
+    // generated signature.
+    if (isPassthroughBody(body)) {
+        return language === "python" ? "request={{__body__}}" : "{{__body__}}";
+    }
     if (language === "java" && requestClassName) return javaBuilderWrap(requestClassName);
     if (language === "typescript") return "{ {{__body__}} }";
     return "{{__body__}}";
@@ -266,7 +274,11 @@ function separatorFor(language: Language): string {
 }
 
 function fieldTemplateFor(jsonKey: string, language: Language): string {
-    if (language === "python") return `${jsonKey}={{value}}`;
+    // Python: Fern codegen snake_cases camelCase JSON keys into kwarg names
+    // (`resourceType` → `resource_type=`). The `jsonKey` field stays in the
+    // wire form so consumers can still look up `body[jsonKey]` against the
+    // example body, which mirrors the OpenAPI schema verbatim.
+    if (language === "python") return `${camelToSnake(jsonKey)}={{value}}`;
     if (language === "typescript") return `${JSON.stringify(jsonKey)}: {{value}}`;
     // Java: snake_case JSON keys become camelCase setters.
     return `.${snakeToCamel(jsonKey)}({{value}})`;

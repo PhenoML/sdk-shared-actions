@@ -147,6 +147,31 @@
         "responses": { "204": { "description": "OK" } }
       }
     },
+    "/construe/codes/{codeID}": {
+      "post": {
+        "parameters": [
+          { "name": "codeID", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["resourceType"],
+                "properties": {
+                  "resourceType": { "type": "string" },
+                  "fhir_path": { "type": "string" }
+                }
+              },
+              "example": { "resourceType": "Patient", "fhir_path": "/x" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "content": { "application/json": { "example": { "ok": true } } } }
+        }
+      }
+    },
     "/agent/{id}/comments/{comment_id}": {
       "parameters": [
         { "$ref": "#/components/parameters/agent_IdParam" },
