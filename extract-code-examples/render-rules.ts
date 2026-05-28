@@ -10,7 +10,7 @@ import type {
     SchemaFieldKind,
     SpecEndpoint,
 } from "./types";
-import { pascalCase, screamingSnake, snakeToCamel, stripSchemaPrefix } from "./utils";
+import { camelToSnake, pascalCase, screamingSnake, snakeToCamel, stripSchemaPrefix } from "./utils";
 
 export const RENDER_RULES_BY_LANGUAGE: Record<Language, RenderRules> = {
     typescript: {
@@ -48,12 +48,14 @@ export function buildRenderSchema(
     mapping: EndpointMapping,
     language: Language,
 ): RenderSchema {
-    const params = spec.pathParams.map<ParamField>((p) => ({
-        name: p.name,
-        kind: inferKind(p.schema),
-    }));
+    // OpenAPI doesn't require `parameters` to be declared in URL order, but
+    // `pathParamNames` from the parser is URL-ordered, and TS/Java consumers
+    // pass positional values matching the URL/method signature. Align both
+    // by URL placeholder order so `params[i]` and `pathParamNames[i]` refer
+    // to the same path slot.
+    const params = paramsInUrlOrder(spec);
 
-    let body = spec.requestSchema ? buildBodySchema(spec.requestSchema, language) : undefined;
+    let body = spec.requestSchema ? buildBodySchema(spec.requestSchema, language, mapping) : undefined;
     if (spec.queryParams.length > 0) {
         // Query params travel as SDK kwargs/options alongside body fields —
         // Fern emits a single call signature for both. Append them so the
@@ -73,7 +75,7 @@ export function buildRenderSchema(
             );
         } else {
             const queryFields = spec.queryParams.map((p) =>
-                buildField(p.name, p.schema ?? {}, p.required === true, language),
+                buildField(p.name, p.schema ?? {}, p.required === true, language, mapping),
             );
             body = body
                 ? { ...body, fields: [...body.fields, ...queryFields] }
@@ -116,9 +118,11 @@ function buildCallTemplate(
 ): string {
     // Python accepts path params as kwargs (`delete(id="...")`) — matches the
     // reference.md style. TS/Java take them positionally because that's all
-    // the language permits.
+    // the language permits. The Python kwarg label is the SDK's local
+    // identifier (sourced from the parser), which may differ from the spec
+    // param name when OpenAPI uses camelCase (`codeID` → `code_id`).
     const pathArgs = language === "python"
-        ? params.map((p) => `${p.name}={{${p.name}}}`)
+        ? params.map((p, i) => `${pythonPathKwargLabel(mapping, p, i)}={{${p.name}}}`)
         : params.map((p) => `{{${p.name}}}`);
 
     const accessorParts = mapping.methodChain.slice(0, -1)
@@ -126,17 +130,64 @@ function buildCallTemplate(
     const accessors = accessorParts.join(".");
     const chain = accessors ? `client.${accessors}.${mapping.methodName}` : `client.${mapping.methodName}`;
 
-    const bodySlot = body ? bodySlotFor(body, language, mapping.requestClassName) : undefined;
+    const bodySlot = body ? bodySlotFor(body, language, mapping) : undefined;
     const args = [...pathArgs, ...(bodySlot ? [bodySlot] : [])];
     return `${chain}(${args.join(", ")})`;
 }
 
-function bodySlotFor(body: BodySchema, language: Language, requestClassName: string | undefined): string {
+// SDK-source identifier for the i'th path param, with a fall-back to the spec
+// name when the parser didn't surface one. The fall-back keeps older fixtures
+// (and SDKs whose codegen we haven't fully matched) working — they get a
+// kwarg that mirrors OpenAPI rather than a runtime error.
+function pythonPathKwargLabel(mapping: EndpointMapping, param: ParamField, index: number): string {
+    return mapping.pathParamNames?.[index] ?? param.name;
+}
+
+// Returns path params ordered to match the URL's placeholder sequence. The
+// URL template (`spec.httpPath`) is the authoritative ordering — that's what
+// the SDK method signature mirrors. Matches by snake_cased name since
+// normalizePathParams has already snake_cased the URL placeholders while
+// the spec param entries keep their raw OpenAPI form.
+function paramsInUrlOrder(spec: SpecEndpoint): ParamField[] {
+    const declared = spec.pathParams.map<ParamField>((p) => ({
+        name: p.name,
+        kind: inferKind(p.schema),
+    }));
+    const urlOrder = [...spec.httpPath.matchAll(/\{(\w+)\}/g)].map((m) => m[1]);
+    if (urlOrder.length === 0) return declared;
+    const byKey = new Map(declared.map((p) => [camelToSnake(p.name), p]));
+    const ordered: ParamField[] = [];
+    const seen = new Set<ParamField>();
+    for (const key of urlOrder) {
+        const hit = byKey.get(key);
+        if (hit && !seen.has(hit)) {
+            ordered.push(hit);
+            seen.add(hit);
+        }
+    }
+    // Carry along anything `parameters` declared that doesn't appear in the
+    // URL (rare/malformed, but don't silently drop data the spec asserted).
+    for (const p of declared) if (!seen.has(p)) ordered.push(p);
+    return ordered;
+}
+
+function bodySlotFor(body: BodySchema, language: Language, mapping: EndpointMapping): string {
     // A passthrough body's value IS the whole wire body (a JSON Patch array,
     // for example). Wrapping it in `{ ... }` (TS) or `RequestClass.builder()`
     // (Java) would emit invalid code; both fall back to bare `{{__body__}}`.
-    if (isPassthroughBody(body)) return "{{__body__}}";
-    if (language === "java" && requestClassName) return javaBuilderWrap(requestClassName);
+    //
+    // Python is the exception: its SDK takes the body as a named kwarg, so the
+    // bare body would either chain a positional after kwargs
+    // (`method(id="x", [...])` — invalid Python) or drop the parameter
+    // entirely. We use the kwarg name the parser observed on the method
+    // signature, falling back to `request` (the Fern convention) only when
+    // the parser didn't extract anything.
+    if (isPassthroughBody(body)) {
+        if (language !== "python") return "{{__body__}}";
+        const kwarg = mapping.bodyKwargForPassthrough ?? "request";
+        return `${kwarg}={{__body__}}`;
+    }
+    if (language === "java" && mapping.requestClassName) return javaBuilderWrap(mapping.requestClassName);
     if (language === "typescript") return "{ {{__body__}} }";
     return "{{__body__}}";
 }
@@ -149,7 +200,7 @@ function javaBuilderWrap(className: string): string {
     return `${className}.builder(){{__body__}}.build()`;
 }
 
-function buildBodySchema(schema: ResolvedSchema, language: Language): BodySchema {
+function buildBodySchema(schema: ResolvedSchema, language: Language, mapping?: EndpointMapping): BodySchema {
     // No named properties to iterate — synthesize a passthrough field so the
     // consumer can render the curated example without per-key templates.
     // Covers (a) non-object roots (array, scalar), (b) top-level `oneOf`
@@ -176,11 +227,13 @@ function buildBodySchema(schema: ResolvedSchema, language: Language): BodySchema
 
     // Required first (Java staged builders enforce this; TS/Python adopt the
     // same order for cross-language consistency), then optional in spec order.
+    // `mapping` is only threaded into top-level fields — nested objects render
+    // as inline literals (dict/object/builder), not as named SDK kwargs.
     for (const name of schema.required ?? []) {
-        if (name in properties) fields.push(buildField(name, properties[name], true, language));
+        if (name in properties) fields.push(buildField(name, properties[name], true, language, mapping));
     }
     for (const [name, prop] of Object.entries(properties)) {
-        if (!required.has(name)) fields.push(buildField(name, prop, false, language));
+        if (!required.has(name)) fields.push(buildField(name, prop, false, language, mapping));
     }
     return { fieldSeparator: separatorFor(language), fields };
 }
@@ -190,10 +243,11 @@ function buildField(
     prop: ResolvedSchema,
     required: boolean,
     language: Language,
+    mapping?: EndpointMapping,
 ): SchemaField {
     return populateNested({
         jsonKey,
-        fieldTemplate: fieldTemplateFor(jsonKey, language),
+        fieldTemplate: fieldTemplateFor(jsonKey, language, mapping),
         kind: inferKind(prop),
         required,
     }, prop, language);
@@ -265,8 +319,17 @@ function separatorFor(language: Language): string {
     return language === "java" ? "" : ", ";
 }
 
-function fieldTemplateFor(jsonKey: string, language: Language): string {
-    if (language === "python") return `${jsonKey}={{value}}`;
+function fieldTemplateFor(jsonKey: string, language: Language, mapping?: EndpointMapping): string {
+    if (language === "python") {
+        // Python kwarg name = the identifier the SDK's method signature
+        // exposes for this wire key (read off the source by the parser).
+        // When the parser doesn't surface one (older fixtures, unknown
+        // codegen pattern) the wire key is used verbatim — that gives the
+        // user a visible artifact to fix rather than a silent miscompile
+        // from a snake_case heuristic.
+        const kwarg = mapping?.bodyKwargByJsonKey?.[jsonKey] ?? jsonKey;
+        return `${kwarg}={{value}}`;
+    }
     if (language === "typescript") return `${JSON.stringify(jsonKey)}: {{value}}`;
     // Java: snake_case JSON keys become camelCase setters.
     return `.${snakeToCamel(jsonKey)}({{value}})`;
@@ -293,4 +356,3 @@ function enumConstantsFor(
     }
     return out;
 }
-

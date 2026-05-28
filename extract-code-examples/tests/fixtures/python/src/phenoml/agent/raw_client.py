@@ -30,6 +30,7 @@ class RawAgentClient:
         _response = self._client_wrapper.httpx_client.request(
             "agent/list",
             method="GET",
+            params={"tags": tags},
         )
         return _response
 
@@ -40,6 +41,27 @@ class RawAgentClient:
             json={"prompt": prompt},
         ) as _response:
             yield _response
+
+    def patch_with_filter(self, id, *, request, verbose=None, request_options=None):
+        # Passthrough body: a JSON Patch array passed straight through as
+        # `request`. Exercises bodyKwargForPassthrough extraction.
+        _response = self._client_wrapper.httpx_client.request(
+            f"agent/{jsonable_encoder(id)}/patch-with-filter",
+            method="PATCH",
+            json=jsonable_encoder(request),
+        )
+        return _response
+
+    def post_code(self, code_id, *, resource_type, fhir_path=None, request_options=None):
+        # camelCase OpenAPI keys mapped to snake_case Python identifiers —
+        # exercises bodyKwargByJsonKey extraction. The path param `code_id`
+        # is the SDK identifier for the spec's `codeID`.
+        _response = self._client_wrapper.httpx_client.request(
+            f"construe/codes/{jsonable_encoder(code_id)}",
+            method="POST",
+            json={"resourceType": resource_type, "fhir_path": fhir_path},
+        )
+        return _response
 
 
 class AsyncRawAgentClient:

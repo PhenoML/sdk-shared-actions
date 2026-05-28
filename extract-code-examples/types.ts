@@ -11,6 +11,21 @@ export interface EndpointMapping {
     // (e.g. "CohortRequest"). Used by render-rules to build the callTemplate's
     // builder wrapper. Undefined for endpoints with no body parameter.
     requestClassName?: string;
+    // SDK-side identifiers for the method's path params, in URL order. The
+    // language-specific renderer uses these for the call's positional/kwarg
+    // argument labels — bypassing assumptions about Fern's case conversion
+    // (e.g. Python `code_id` for OpenAPI's `codeID`).
+    pathParamNames?: string[];
+    // SDK-side kwarg name for each JSON request-body field, keyed by the wire
+    // (OpenAPI) JSON key. Lets the Python renderer emit
+    // `resource_type=value` for an OpenAPI field named `resourceType`,
+    // sourced from the actual SDK signature rather than a snake_case heuristic.
+    bodyKwargByJsonKey?: Record<string, string>;
+    // SDK-side kwarg name when the wire body is a passthrough (JSON Patch
+    // array, untyped object, discriminated union with no wrapping object,
+    // etc.) — Fern's Python codegen typically uses `request`, but we read it
+    // off the source rather than hard-coding the convention.
+    bodyKwargForPassthrough?: string;
 }
 
 // Per-endpoint data extracted from the OpenAPI spec.
