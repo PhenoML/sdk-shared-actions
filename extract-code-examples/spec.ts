@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import type { ResolvedSchema, SpecEndpoint, SpecParam } from "./types";
-import { camelToSnake, normalizePathParams } from "./utils";
+import { normalizePathParams } from "./utils";
 
 interface OpenApiDocument {
     paths: Record<string, OpenApiPathItem>;
@@ -146,13 +146,7 @@ function buildSpecEndpoint(
     for (const ref of op.parameters ?? []) {
         const p = resolveParameter(ref, parameters);
         if (!p) continue;
-        // Path param names must match the URL placeholder, which we snake_case
-        // via normalizePathParams above — keep `name` aligned so consumers can
-        // look up `pathParams[name]` against the template. Query/header names
-        // travel as-is (they're the wire-level field names users supply in
-        // their `body` map, which mirrors the OpenAPI schema verbatim).
-        const name = p.in === "path" ? camelToSnake(p.name) : p.name;
-        const entry: SpecParam = { name };
+        const entry: SpecParam = { name: p.name };
         if (p.required) entry.required = true;
         if (p.schema) entry.schema = resolve(p.schema);
         if (p.in === "path") pathParams.push(entry);

@@ -111,16 +111,18 @@ describe("loadSpec", () => {
             "POST /agent/dual-content",
             "POST /agent/stream",
             "POST /agent/union",
-            // camelCase path param in the spec — `codeID` — must normalize to
-            // `{code_id}` (matches normalizePathParams' template rewrite).
+            // URL placeholder normalizes to `{code_id}` via normalizePathParams
+            // even though the OpenAPI parameter name is `codeID` — the spec
+            // entry keeps the raw OpenAPI form (`codeID`) so language-agnostic
+            // consumers see what the spec declares.
             "POST /construe/codes/{code_id}",
         ]);
     });
 
-    test("camelCase path param names normalize to snake_case (matches normalized URL placeholder)", () => {
+    test("path param name is preserved verbatim from the OpenAPI spec (the URL template normalizes separately)", () => {
         const endpoints = loadSpec(specPath);
         const ep = endpoints.find((e) => e.httpPath === "/construe/codes/{code_id}");
-        expect(ep?.pathParams.map((p) => p.name)).toEqual(["code_id"]);
+        expect(ep?.pathParams.map((p) => p.name)).toEqual(["codeID"]);
     });
 
     test("path-level parameters are inherited by every operation on the path", () => {
@@ -198,18 +200,66 @@ describe("loadSpec", () => {
 // ============================================================
 
 describe("pyExtractEndpoints", () => {
+    const file = path.join(FIXTURES, "python/src/phenoml/agent/raw_client.py");
+    const pkgRoot = path.join(FIXTURES, "python/src/phenoml");
+    const findEndpoint = (method: string, p: string) =>
+        pyExtractEndpoints(file, pkgRoot).find((e) => e.httpMethod === method && e.httpPath === p);
+
     test("extracts all sync-class endpoints, skipping async twin", () => {
-        const file = path.join(FIXTURES, "python/src/phenoml/agent/raw_client.py");
-        const pkgRoot = path.join(FIXTURES, "python/src/phenoml");
         const endpoints = pyExtractEndpoints(file, pkgRoot);
         const keys = endpoints.map((e) => `${e.httpMethod} ${e.httpPath}`).sort();
         expect(keys).toEqual([
             "DELETE /agent/{id}",
             "GET /agent/list",
             "GET /agent/{id}",
+            "PATCH /agent/{id}/patch-with-filter",
             "POST /agent/create",
             "POST /agent/stream",
+            "POST /construe/codes/{code_id}",
         ]);
+    });
+
+    test("captures path-param SDK identifiers in URL order", () => {
+        // `f"agent/{jsonable_encoder(id)}/patch-with-filter"` → ["id"]
+        expect(findEndpoint("PATCH", "/agent/{id}/patch-with-filter")?.pathParamNames).toEqual(["id"]);
+        // Single-segment path params still report.
+        expect(findEndpoint("GET", "/agent/{id}")?.pathParamNames).toEqual(["id"]);
+        // Multi-segment paths preserve order.
+        expect(findEndpoint("POST", "/construe/codes/{code_id}")?.pathParamNames).toEqual(["code_id"]);
+    });
+
+    test("captures wire→identifier map from `json={...}` dict literal", () => {
+        // post_code's signature uses snake_case Python identifiers for camelCase
+        // OpenAPI keys — the parser reads the mapping straight from the dict.
+        expect(findEndpoint("POST", "/construe/codes/{code_id}")?.bodyKwargByJsonKey).toEqual({
+            resourceType: "resource_type",
+            fhir_path: "fhir_path",
+        });
+        // Already-aligned identifiers come through unchanged.
+        expect(findEndpoint("POST", "/agent/create")?.bodyKwargByJsonKey).toEqual({
+            name: "name",
+            description: "description",
+            role: "role",
+        });
+    });
+
+    test("captures passthrough body kwarg from `json=jsonable_encoder(<ident>)`", () => {
+        const patch = findEndpoint("PATCH", "/agent/{id}/patch-with-filter");
+        expect(patch?.bodyKwargForPassthrough).toBe("request");
+        // No corresponding dict map for passthrough bodies.
+        expect(patch?.bodyKwargByJsonKey).toBeUndefined();
+    });
+
+    test("captures query kwargs from `params={...}`", () => {
+        // list() declares `params={"tags": tags}` — the wire key matches the
+        // Python kwarg here, but the extraction path is the same as bodies.
+        expect(findEndpoint("GET", "/agent/list")?.bodyKwargByJsonKey).toEqual({ tags: "tags" });
+    });
+
+    test("endpoints with no request body / query params omit the kwarg map", () => {
+        const get = findEndpoint("GET", "/agent/{id}");
+        expect(get?.bodyKwargByJsonKey).toBeUndefined();
+        expect(get?.bodyKwargForPassthrough).toBeUndefined();
     });
 
     test("derives method chain from file path", () => {
@@ -642,23 +692,25 @@ describe("buildRenderSchema", () => {
         expect(tagPy?.nested).toBeUndefined();
     });
 
-    test("Python: passthrough body uses `request=` kwarg (path params + raw body can't be positional)", () => {
-        // The previous render emitted `client.x.method(id="x", [...])` —
-        // invalid Python because positional args can't follow kwargs, and
-        // Fern's Python signature requires the body via `request=`.
+    test("Python: passthrough body uses the SDK's kwarg name (read off the parser, not hard-coded)", () => {
+        // The Python SDK's signature is `patch(id, *, request, ...)`. Without
+        // the parser's name we'd emit `client.x.method(id="x", [...])` —
+        // invalid Python because positional args can't follow kwargs.
         const patch = findSpec("PATCH", "/agent/{id}/patch-with-filter");
         const render = buildRenderSchema(patch, {
             httpMethod: "PATCH", httpPath: "/agent/{id}/patch-with-filter",
             methodChain: ["agent", "patch"], methodName: "patch",
+            pathParamNames: ["id"],
+            bodyKwargForPassthrough: "request",
         }, "python");
         expect(render.callTemplate).toBe("client.agent.patch(id={{id}}, request={{__body__}})");
         expect(render.body?.fields[0].passthroughBody).toBe(true);
     });
 
-    test("Python: passthrough body with no path params still uses `request=` kwarg", () => {
-        // Fern's Python SDK always exposes the wire body as `request=` for
-        // passthrough types — keep the convention consistent regardless of
-        // path params.
+    test("Python: passthrough body falls back to `request=` when the parser didn't surface a name", () => {
+        // No mapping for the body kwarg → use Fern's conventional name as a
+        // last resort. The fallback keeps things working when codegen changes
+        // shape; we'd see a parser warning rather than a runtime miscompile.
         const union = findSpec("POST", "/agent/union");
         const render = buildRenderSchema(union, {
             httpMethod: "POST", httpPath: "/agent/union",
@@ -667,41 +719,73 @@ describe("buildRenderSchema", () => {
         expect(render.callTemplate).toBe("client.agent.union(request={{__body__}})");
     });
 
-    test("Python: camelCase JSON keys are snake_cased in the rendered kwarg name", () => {
-        // Fern's Python codegen translates `resourceType` (OpenAPI) into
-        // `resource_type=` kwargs. The `jsonKey` field stays in the wire
-        // form so consumers can look up `body[jsonKey]` against the example.
+    test("Python: camelCase JSON keys use the SDK kwarg name from the parser", () => {
+        // OpenAPI key `resourceType` → SDK kwarg `resource_type` (from the
+        // parser's `bodyKwargByJsonKey`). The wire key stays on the field so
+        // consumers can still look up `body[jsonKey]`.
+        const create = findSpec("POST", "/construe/codes/{code_id}");
+        const render = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/construe/codes/{code_id}",
+            methodChain: ["construe", "post_code"], methodName: "post_code",
+            pathParamNames: ["code_id"],
+            bodyKwargByJsonKey: { resourceType: "resource_type", fhir_path: "fhir_path" },
+        }, "python");
+        const resourceType = render.body?.fields.find((f) => f.jsonKey === "resourceType");
+        expect(resourceType?.jsonKey).toBe("resourceType");
+        expect(resourceType?.fieldTemplate).toBe("resource_type={{value}}");
+        const fhirPath = render.body?.fields.find((f) => f.jsonKey === "fhir_path");
+        expect(fhirPath?.fieldTemplate).toBe("fhir_path={{value}}");
+    });
+
+    test("Python: body field falls back to the wire key when the parser didn't map it", () => {
+        // No bodyKwargByJsonKey → render uses the wire key verbatim. Surfaces
+        // a visible artifact (`resourceType=` in the rendered Python) so the
+        // miss is obvious instead of being papered over with a snake_case
+        // heuristic.
         const create = findSpec("POST", "/construe/codes/{code_id}");
         const render = buildRenderSchema(create, {
             httpMethod: "POST", httpPath: "/construe/codes/{code_id}",
             methodChain: ["construe", "post_code"], methodName: "post_code",
         }, "python");
         const resourceType = render.body?.fields.find((f) => f.jsonKey === "resourceType");
-        expect(resourceType?.fieldTemplate).toBe("resource_type={{value}}");
-        // Already-snake_case keys pass through unchanged (no double-mangling).
-        const fhirPath = render.body?.fields.find((f) => f.jsonKey === "fhir_path");
-        expect(fhirPath?.fieldTemplate).toBe("fhir_path={{value}}");
+        expect(resourceType?.fieldTemplate).toBe("resourceType={{value}}");
     });
 
-    test("Python: camelCase path param renders as snake_case kwarg and placeholder", () => {
-        // OpenAPI `codeID` → Python `code_id=` kwarg; placeholder `{{code_id}}`
-        // also matches the (already snake_cased) URL template.
+    test("Python: path-param kwarg label comes from `pathParamNames`; the placeholder uses the spec name", () => {
+        // OpenAPI `codeID` → SDK identifier `code_id`. The placeholder
+        // `{{codeID}}` stays in the OpenAPI form so consumers can keep
+        // passing a language-agnostic `pathParams` map keyed by spec name.
+        const create = findSpec("POST", "/construe/codes/{code_id}");
+        const render = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/construe/codes/{code_id}",
+            methodChain: ["construe", "post_code"], methodName: "post_code",
+            pathParamNames: ["code_id"],
+            bodyKwargByJsonKey: { resourceType: "resource_type", fhir_path: "fhir_path" },
+        }, "python");
+        expect(render.params).toEqual([{ name: "codeID", kind: "string" }]);
+        expect(render.callTemplate).toBe("client.construe.post_code(code_id={{codeID}}, {{__body__}})");
+    });
+
+    test("Python: path-param kwarg label falls back to the spec name when the parser is silent", () => {
         const create = findSpec("POST", "/construe/codes/{code_id}");
         const render = buildRenderSchema(create, {
             httpMethod: "POST", httpPath: "/construe/codes/{code_id}",
             methodChain: ["construe", "post_code"], methodName: "post_code",
         }, "python");
-        expect(render.params).toEqual([{ name: "code_id", kind: "string" }]);
-        expect(render.callTemplate).toBe("client.construe.post_code(code_id={{code_id}}, {{__body__}})");
+        // No SDK-side name → spec name fills both sides of the kwarg.
+        expect(render.callTemplate).toBe("client.construe.post_code(codeID={{codeID}}, {{__body__}})");
     });
 
-    test("TypeScript: body fields with camelCase JSON keys stay camelCase in the rendered key", () => {
-        // Bug-#2 fix is Python-only: TS/Java keep the wire form so the emitted
-        // object literal matches the SDK's request type.
+    test("TypeScript: object-literal keys stay in the wire form regardless of parser data", () => {
+        // The TS body slot is `{ ... }` and the keys are wire keys — only
+        // Python kwargs route through `bodyKwargByJsonKey`. Confirms the
+        // refactor didn't accidentally apply Python-style remapping
+        // cross-language.
         const create = findSpec("POST", "/construe/codes/{code_id}");
         const render = buildRenderSchema(create, {
             httpMethod: "POST", httpPath: "/construe/codes/{code_id}",
             methodChain: ["construe", "postCode"], methodName: "postCode",
+            bodyKwargByJsonKey: { resourceType: "resource_type" },
         }, "typescript");
         const resourceType = render.body?.fields.find((f) => f.jsonKey === "resourceType");
         expect(resourceType?.fieldTemplate).toBe(`"resourceType": {{value}}`);
@@ -730,7 +814,7 @@ describe("buildManifest end-to-end", () => {
         originGitCommit: "fixture-abc123",
     };
 
-    test("Python: matches all five spec endpoints", () => {
+    test("Python: matches all fixture-covered spec endpoints", () => {
         const spec = loadSpec(path.join(FIXTURES, "openapi-shared.json"));
         const mappings = createPythonParser().parseEndpoints(path.join(FIXTURES, "python"));
         const manifest = buildManifest(spec, mappings, "python", "phenoml", metadata);
@@ -738,9 +822,35 @@ describe("buildManifest end-to-end", () => {
             "DELETE /agent/{id}",
             "GET /agent/list",
             "GET /agent/{id}",
+            "PATCH /agent/{id}/patch-with-filter",
             "POST /agent/create",
             "POST /agent/stream",
+            "POST /construe/codes/{code_id}",
         ]);
+    });
+
+    test("Python end-to-end: parser-extracted names drive the rendered call (no convention encoded)", () => {
+        // Wires up spec + parser + render-rules and asserts the rendered
+        // Python call matches what the SDK actually expects — exercising
+        // pathParamNames, bodyKwargByJsonKey, and bodyKwargForPassthrough
+        // end-to-end.
+        const spec = loadSpec(path.join(FIXTURES, "openapi-shared.json"));
+        const mappings = createPythonParser().parseEndpoints(path.join(FIXTURES, "python"));
+        const manifest = buildManifest(spec, mappings, "python", "phenoml", metadata);
+
+        // camelCase path param + camelCase JSON key → SDK identifiers.
+        expect(manifest.examples["POST /construe/codes/{code_id}"].render?.callTemplate).toBe(
+            "client.agent.post_code(code_id={{codeID}}, {{__body__}})",
+        );
+        const postCodeFields = manifest.examples["POST /construe/codes/{code_id}"].render?.body?.fields ?? [];
+        expect(postCodeFields.find((f) => f.jsonKey === "resourceType")?.fieldTemplate)
+            .toBe("resource_type={{value}}");
+
+        // Passthrough body + path param: kwarg name `request` (from the
+        // signature) preserves Python's "kwargs can't follow positional"
+        // rule.
+        expect(manifest.examples["PATCH /agent/{id}/patch-with-filter"].render?.callTemplate)
+            .toBe("client.agent.patch_with_filter(id={{id}}, request={{__body__}})");
     });
 
     test("includes discriminator-style example fields verbatim (the original bug fix)", () => {
