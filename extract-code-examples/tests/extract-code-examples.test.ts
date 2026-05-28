@@ -267,6 +267,43 @@ describe("pyExtractEndpoints", () => {
         expect(pyDeriveMethodChain("tools/resources/mcp_server/raw_client.py"))
             .toEqual(["tools", "mcp_server"]);
     });
+
+    test("captures all entries in a `json={…}` literal that spans >30 source lines", () => {
+        // Regression: an earlier 30-line cap in pyCollectCallText truncated
+        // the call mid-dict, leaving the brace-matcher with an unbalanced
+        // buffer and silently dropping bodyKwargByJsonKey. Large Fern request
+        // models (40+ fields, one per line) hit this. We force the condition
+        // by synthesizing a 40-entry body.
+        const fieldCount = 40;
+        const fieldNames = Array.from({ length: fieldCount }, (_, i) => `field${i}`);
+        const dictEntries = fieldNames.map((n) => `            "${n}": ${n},`).join("\n");
+        const tmp = path.join(import.meta.dir, "tmp-long-py");
+        const pkg = path.join(tmp, "src/phenoml/widgets");
+        fs.mkdirSync(pkg, { recursive: true });
+        fs.writeFileSync(
+            path.join(pkg, "raw_client.py"),
+            `class RawWidgetsClient:
+    def bulk(self, *, ${fieldNames.join(", ")}, request_options=None):
+        _response = self._client_wrapper.httpx_client.request(
+            "widgets/bulk",
+            method="POST",
+            json={
+${dictEntries}
+            },
+        )
+`,
+        );
+        try {
+            const mappings = createPythonParser().parseEndpoints(tmp);
+            const bulk = mappings.find((m) => m.httpMethod === "POST" && m.httpPath === "/widgets/bulk");
+            expect(bulk?.bodyKwargByJsonKey).toBeDefined();
+            expect(Object.keys(bulk!.bodyKwargByJsonKey!)).toHaveLength(fieldCount);
+            // The last entry sits well past the previous 30-line cap.
+            expect(bulk!.bodyKwargByJsonKey![`field${fieldCount - 1}`]).toBe(`field${fieldCount - 1}`);
+        } finally {
+            fs.rmSync(tmp, { recursive: true, force: true });
+        }
+    });
 });
 
 describe("tsExtractEndpoints", () => {
@@ -789,6 +826,51 @@ describe("buildRenderSchema", () => {
         }, "typescript");
         const resourceType = render.body?.fields.find((f) => f.jsonKey === "resourceType");
         expect(resourceType?.fieldTemplate).toBe(`"resourceType": {{value}}`);
+    });
+
+    test("Python: path params reorder to URL placeholder order when spec declares them out of order", () => {
+        // OpenAPI permits `parameters` in any order — here the spec lists
+        // `userID` before `orgID` for a URL of `/orgs/{orgID}/users/{userID}`.
+        // Without reordering, pathParamNames[0]=org_id would pair with
+        // params[0]=userID, producing `org_id={{userID}}` (swapped values).
+        const synthetic = {
+            httpMethod: "GET",
+            httpPath: "/orgs/{org_id}/users/{user_id}",
+            pathParams: [
+                { name: "userID", required: true, schema: { type: "string" as const } },
+                { name: "orgID", required: true, schema: { type: "string" as const } },
+            ],
+            queryParams: [],
+            isStreaming: false,
+        };
+        const render = buildRenderSchema(synthetic, {
+            httpMethod: "GET", httpPath: "/orgs/{org_id}/users/{user_id}",
+            methodChain: ["orgs", "get_user"], methodName: "get_user",
+            pathParamNames: ["org_id", "user_id"],
+        }, "python");
+        expect(render.params.map((p) => p.name)).toEqual(["orgID", "userID"]);
+        expect(render.callTemplate).toBe("client.orgs.get_user(org_id={{orgID}}, user_id={{userID}})");
+    });
+
+    test("TypeScript: positional path args follow URL order, not spec declaration order", () => {
+        // Positional path args are even more sensitive to ordering than
+        // Python kwargs — if `params` were spec-ordered, TS consumers passing
+        // values in URL order would silently get swapped substitutions.
+        const synthetic = {
+            httpMethod: "GET",
+            httpPath: "/orgs/{org_id}/users/{user_id}",
+            pathParams: [
+                { name: "userID", required: true, schema: { type: "string" as const } },
+                { name: "orgID", required: true, schema: { type: "string" as const } },
+            ],
+            queryParams: [],
+            isStreaming: false,
+        };
+        const render = buildRenderSchema(synthetic, {
+            httpMethod: "GET", httpPath: "/orgs/{org_id}/users/{user_id}",
+            methodChain: ["orgs", "getUser"], methodName: "getUser",
+        }, "typescript");
+        expect(render.callTemplate).toBe("client.orgs.getUser({{orgID}}, {{userID}})");
     });
 
     test("GET endpoint with only query params produces a body schema of those params", () => {

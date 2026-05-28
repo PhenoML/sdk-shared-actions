@@ -10,7 +10,7 @@ import type {
     SchemaFieldKind,
     SpecEndpoint,
 } from "./types";
-import { pascalCase, screamingSnake, snakeToCamel, stripSchemaPrefix } from "./utils";
+import { camelToSnake, pascalCase, screamingSnake, snakeToCamel, stripSchemaPrefix } from "./utils";
 
 export const RENDER_RULES_BY_LANGUAGE: Record<Language, RenderRules> = {
     typescript: {
@@ -48,10 +48,12 @@ export function buildRenderSchema(
     mapping: EndpointMapping,
     language: Language,
 ): RenderSchema {
-    const params = spec.pathParams.map<ParamField>((p) => ({
-        name: p.name,
-        kind: inferKind(p.schema),
-    }));
+    // OpenAPI doesn't require `parameters` to be declared in URL order, but
+    // `pathParamNames` from the parser is URL-ordered, and TS/Java consumers
+    // pass positional values matching the URL/method signature. Align both
+    // by URL placeholder order so `params[i]` and `pathParamNames[i]` refer
+    // to the same path slot.
+    const params = paramsInUrlOrder(spec);
 
     let body = spec.requestSchema ? buildBodySchema(spec.requestSchema, language, mapping) : undefined;
     if (spec.queryParams.length > 0) {
@@ -139,6 +141,34 @@ function buildCallTemplate(
 // kwarg that mirrors OpenAPI rather than a runtime error.
 function pythonPathKwargLabel(mapping: EndpointMapping, param: ParamField, index: number): string {
     return mapping.pathParamNames?.[index] ?? param.name;
+}
+
+// Returns path params ordered to match the URL's placeholder sequence. The
+// URL template (`spec.httpPath`) is the authoritative ordering — that's what
+// the SDK method signature mirrors. Matches by snake_cased name since
+// normalizePathParams has already snake_cased the URL placeholders while
+// the spec param entries keep their raw OpenAPI form.
+function paramsInUrlOrder(spec: SpecEndpoint): ParamField[] {
+    const declared = spec.pathParams.map<ParamField>((p) => ({
+        name: p.name,
+        kind: inferKind(p.schema),
+    }));
+    const urlOrder = [...spec.httpPath.matchAll(/\{(\w+)\}/g)].map((m) => m[1]);
+    if (urlOrder.length === 0) return declared;
+    const byKey = new Map(declared.map((p) => [camelToSnake(p.name), p]));
+    const ordered: ParamField[] = [];
+    const seen = new Set<ParamField>();
+    for (const key of urlOrder) {
+        const hit = byKey.get(key);
+        if (hit && !seen.has(hit)) {
+            ordered.push(hit);
+            seen.add(hit);
+        }
+    }
+    // Carry along anything `parameters` declared that doesn't appear in the
+    // URL (rare/malformed, but don't silently drop data the spec asserted).
+    for (const p of declared) if (!seen.has(p)) ordered.push(p);
+    return ordered;
 }
 
 function bodySlotFor(body: BodySchema, language: Language, mapping: EndpointMapping): string {

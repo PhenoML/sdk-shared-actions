@@ -116,13 +116,16 @@ export function pyDeriveMethodChain(relativePath: string): string[] {
 
 // Captures the full text of a `request(...)` / `stream(...)` call, starting
 // at `startLine`'s opening paren and ending at the matching close. Multi-line
-// calls (the common Fern shape) are joined into one string.
+// calls (the common Fern shape) are joined into one string. Paren-depth
+// tracking determines termination — large request models with many-line
+// `json={...}` dicts must not be truncated mid-literal, otherwise the
+// downstream brace-match in `pyExtractBodyKwargs` fails and the wire→ident
+// map silently goes missing.
 function pyCollectCallText(lines: string[], startLine: number): string {
     let buf = "";
     let depth = 0;
     let started = false;
-    const limit = Math.min(startLine + 30, lines.length);
-    for (let i = startLine; i < limit; i++) {
+    for (let i = startLine; i < lines.length; i++) {
         for (const c of lines[i]) {
             buf += c;
             if (c === "(") { depth++; started = true; }
