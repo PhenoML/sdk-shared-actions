@@ -24,6 +24,19 @@
         },
         "responses": { "204": { "description": "Created" } }
       }
+    },
+    "/widget/freeform": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "properties": {} },
+              "example": { "anything": "goes", "here": 1 }
+            }
+          }
+        },
+        "responses": { "204": { "description": "OK" } }
+      }
     }
   }
 }

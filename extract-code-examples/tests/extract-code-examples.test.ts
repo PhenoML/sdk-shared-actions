@@ -189,6 +189,11 @@ describe("loadSpec", () => {
         // upstream — fail loudly so the spec author notices.
         const driftPath = path.join(FIXTURES, "openapi-drift.json");
         expect(() => loadSpec(driftPath)).toThrow(/Spec drift.*POST \/widget\/create.*\[color, shape\]/s);
+        // A schema with an explicitly-empty `properties: {}` is a passthrough
+        // body (matches buildBodySchema's rule), not drift — extra example
+        // keys there are intentional, not a spec gap. Confirm the freeform
+        // endpoint doesn't get flagged.
+        expect(() => loadSpec(driftPath)).not.toThrow(/widget\/freeform/);
     });
 });
 

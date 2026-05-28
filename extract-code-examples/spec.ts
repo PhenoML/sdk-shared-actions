@@ -130,12 +130,18 @@ export function loadSpec(specPath: string): SpecEndpoint[] {
 // example and schema agree (or the check doesn't apply — passthrough/scalar/
 // array bodies have no per-key catalog to drift against).
 function findExampleDrift(ep: SpecEndpoint): string | undefined {
-    const schema = ep.requestSchema;
     const example = ep.requestExample;
-    if (!schema?.properties || example === undefined) return undefined;
-    if (typeof example !== "object" || example === null || Array.isArray(example)) return undefined;
-    const declared = new Set(Object.keys(schema.properties));
-    const extras = Object.keys(example as Record<string, unknown>).filter((k) => !declared.has(k));
+    if (example === undefined || typeof example !== "object" || example === null || Array.isArray(example)) {
+        return undefined;
+    }
+    // Mirror buildBodySchema's passthrough rule (render-rules.ts): a schema
+    // with no declared properties (missing, or explicitly `{}` — common for
+    // free-form or oneOf object bodies) renders the example value intact, so
+    // there's no per-key catalog for the example to drift against.
+    const declared = Object.keys(ep.requestSchema?.properties ?? {});
+    if (declared.length === 0) return undefined;
+    const declaredSet = new Set(declared);
+    const extras = Object.keys(example as Record<string, unknown>).filter((k) => !declaredSet.has(k));
     if (extras.length === 0) return undefined;
     return `${ep.httpMethod} ${ep.httpPath}: example body has key(s) [${extras.join(", ")}] not declared in the request schema`;
 }
