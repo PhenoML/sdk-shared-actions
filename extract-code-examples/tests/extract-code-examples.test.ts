@@ -182,6 +182,14 @@ describe("loadSpec", () => {
         expect(create?.requestSchema?.properties?.role.enum).toEqual(["assistant", "user", "system"]);
         expect(create?.requestSchema?.properties?.role.$refName).toBe("agent_AgentRole");
     });
+
+    test("throws when an example body has top-level keys not declared in the request schema", () => {
+        // The render-schema field catalog is built from the schema, so extra
+        // example keys would be silently dropped at render time. The fix is
+        // upstream — fail loudly so the spec author notices.
+        const driftPath = path.join(FIXTURES, "openapi-drift.json");
+        expect(() => loadSpec(driftPath)).toThrow(/Spec drift.*POST \/widget\/create.*\[color, shape\]/s);
+    });
 });
 
 // ============================================================

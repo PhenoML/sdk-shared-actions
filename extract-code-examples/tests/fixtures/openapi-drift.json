@@ -1,0 +1,29 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Drift fixture", "version": "1" },
+  "paths": {
+    "/widget/create": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" }
+                }
+              },
+              "example": {
+                "name": "Sprocket",
+                "color": "blue",
+                "shape": "round"
+              }
+            }
+          }
+        },
+        "responses": { "204": { "description": "Created" } }
+      }
+    }
+  }
+}

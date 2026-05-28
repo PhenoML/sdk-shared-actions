@@ -106,7 +106,38 @@ export function loadSpec(specPath: string): SpecEndpoint[] {
             `check that operations use standard HTTP methods (get/post/put/delete/patch).`,
         );
     }
+
+    // Fail loudly when an endpoint's curated example body carries keys the
+    // request schema doesn't declare. The render-schema field catalog is
+    // built from the schema, so those extra keys would be silently dropped
+    // when a consumer re-renders the example — producing a wire payload that
+    // omits whatever the spec author thought they were demonstrating. The
+    // fix is upstream (add the property to the schema, or remove it from the
+    // example); aggregating across endpoints surfaces every gap in one pass.
+    const drift = endpoints.map(findExampleDrift).filter((m): m is string => m !== undefined);
+    if (drift.length > 0) {
+        throw new Error(
+            `Spec drift: ${drift.length} endpoint(s) have example bodies with keys not declared in the request schema. ` +
+            `Fix the OpenAPI schema to declare these properties, or remove them from the example.\n` +
+            drift.map((m) => `  - ${m}`).join("\n"),
+        );
+    }
     return endpoints;
+}
+
+// Returns a one-line description of any top-level example body keys absent
+// from the request schema's declared properties, or undefined when the
+// example and schema agree (or the check doesn't apply — passthrough/scalar/
+// array bodies have no per-key catalog to drift against).
+function findExampleDrift(ep: SpecEndpoint): string | undefined {
+    const schema = ep.requestSchema;
+    const example = ep.requestExample;
+    if (!schema?.properties || example === undefined) return undefined;
+    if (typeof example !== "object" || example === null || Array.isArray(example)) return undefined;
+    const declared = new Set(Object.keys(schema.properties));
+    const extras = Object.keys(example as Record<string, unknown>).filter((k) => !declared.has(k));
+    if (extras.length === 0) return undefined;
+    return `${ep.httpMethod} ${ep.httpPath}: example body has key(s) [${extras.join(", ")}] not declared in the request schema`;
 }
 
 // Combine path-level parameters (inherited by every operation on the path)
