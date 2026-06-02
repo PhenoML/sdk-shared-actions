@@ -1,9 +1,10 @@
 name: Bundle OpenAPI spec
 description: >-
   Fetches the combined OpenAPI spec for an SDK's source commit from the
-  public phenoml-openapi-specs GCS bucket and commits it back to the
-  current branch if the file changed. Assumes the caller has already
-  checked out the target branch (with auth) and granted contents: write.
+  public phenoml-openapi-specs GCS bucket and writes it to the working tree.
+  Committing is left to a separate step (see commit-artifacts) so the spec and
+  other generated artifacts can be written back in a single commit. Assumes the
+  caller has already checked out the target branch.
 
 inputs:
   metadata-path:
@@ -13,10 +14,16 @@ inputs:
     description: "Where to write the bundled spec within the caller repo."
     default: "openapi/openapi.json"
 
+outputs:
+  origin-commit:
+    description: "The Fern originGitCommit the spec was fetched for."
+    value: ${{ steps.fetch.outputs.origin-commit }}
+
 runs:
   using: composite
   steps:
     - name: Fetch combined OpenAPI spec
+      id: fetch
       shell: bash
       env:
         METADATA_PATH: ${{ inputs.metadata-path }}
@@ -27,6 +34,7 @@ runs:
           echo "::error::originGitCommit missing from $METADATA_PATH"
           exit 1
         fi
+        echo "origin-commit=$commit_sha" >> "$GITHUB_OUTPUT"
         echo "Fetching OpenAPI spec for originGitCommit=$commit_sha"
         mkdir -p "$(dirname "$OUTPUT_PATH")"
         # Probe every 5s for up to ~5 minutes while the upstream GCS upload
@@ -39,23 +47,3 @@ runs:
           --retry 60 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
           -o "$OUTPUT_PATH" \
           "https://storage.googleapis.com/phenoml-openapi-specs/combined/specs-${commit_sha}.json"
-
-    - name: Commit spec if changed
-      shell: bash
-      env:
-        METADATA_PATH: ${{ inputs.metadata-path }}
-        OUTPUT_PATH: ${{ inputs.output-path }}
-        PUSH_WITH_RETRY: ${{ github.action_path }}/../_scripts/push-with-retry.sh
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add "$OUTPUT_PATH"
-        # Use --cached so a brand-new (previously untracked) spec is also
-        # detected; plain `git diff` would report no change for it.
-        if git diff --cached --quiet -- "$OUTPUT_PATH"; then
-          echo "Spec unchanged; nothing to commit."
-          exit 0
-        fi
-        commit_sha=$(jq -r .originGitCommit "$METADATA_PATH")
-        git commit -m "chore: bundle OpenAPI spec for ${commit_sha}"
-        bash "$PUSH_WITH_RETRY"

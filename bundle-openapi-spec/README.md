@@ -2,15 +2,20 @@
 
 Composite action. Fetches the combined OpenAPI spec for an SDK's source
 commit (Fern's `originGitCommit`) from the public `phenoml-openapi-specs`
-GCS bucket and commits it back to the current branch if it changed.
-Retries up to ~5 minutes to absorb the race between Fern opening the SDK
-PR and the upstream spec-publish workflow finishing. The git push also
-retries on non-fast-forward so it co-exists with anything else (another
-workflow, a human) pushing to the same branch concurrently.
+GCS bucket and writes it to the working tree. Retries up to ~5 minutes to
+absorb the race between Fern opening the SDK PR and the upstream
+spec-publish workflow finishing.
+
+This action **does not commit** — it only writes the file. Committing is
+handled separately by [`commit-artifacts`](../commit-artifacts) so the spec
+and other generated artifacts (e.g. `code-examples.json`) can be written back
+in a single commit. Most callers should not invoke this action directly;
+use the [`sync-fern-artifacts`](../.github/workflows/sync-fern-artifacts.yml)
+reusable workflow, which runs bundle → extract → commit in one ordered run.
 
 ## Usage
 
-In each SDK repo, add `.github/workflows/bundle-openapi-spec.yml`:
+Standalone (fetch + commit in one job):
 
 ```yaml
 name: bundle-openapi-spec
@@ -29,11 +34,17 @@ jobs:
     # Fork PRs can't push back to the head branch and we don't want to
     # leak tokens to forked code.
     if: github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ env.HEAD_REF }}
       - uses: PhenoML/sdk-shared-actions/bundle-openapi-spec@v1
+      - uses: PhenoML/sdk-shared-actions/commit-artifacts@v1
+        with:
+          paths: openapi/openapi.json
+          message: "chore: bundle OpenAPI spec"
 ```
 
 See [`action.yml`](action.yml) for inputs.
