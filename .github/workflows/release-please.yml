@@ -1,0 +1,31 @@
+name: release-please
+
+# Conventional-commit release automation for this repo's shared actions and
+# reusable workflows. release-please maintains a rolling "release PR" off main:
+# it keeps the next version + CHANGELOG staged, and merging that PR cuts the
+# GitHub release and tags it.
+#
+# Crucially, the release also rewrites the sibling-action pins inside
+# sync-fern-artifacts.yml — every line marked `# x-release-please-version` is
+# bumped to the new version — so the reusable workflow and the composite
+# actions it calls are always released, and reference each other, in lockstep.
+#
+# Config: release-please-config.json (release-type, extra-files to bump).
+# Current version: .release-please-manifest.json.
+# Tags are unprefixed (1.0.0, not v1.0.0) to match how the actions are
+# referenced throughout this repo (include-v-in-tag: false in the config).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
