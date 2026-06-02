@@ -778,6 +778,34 @@ describe("buildRenderSchema", () => {
         expect(py.callTemplate).toBe("client.fhir.create(id={{id}}, request={{__body__}})");
     });
 
+    test("bodyWrapperKey + query params: query is dropped, not nested inside the wrapper", () => {
+        // Fern places query params as siblings of the request wrapper's `body:`
+        // key (`{ body: {...}, verbose }`), but the render schema folds query
+        // into body.fields — which under a wrapper would wrongly nest them
+        // (`{ body: { ...fields, verbose } }`). Fern doesn't emit wrapper+query
+        // today, so (mirroring passthrough+query) the query is dropped rather
+        // than mis-rendered.
+        const synthetic = {
+            httpMethod: "POST", httpPath: "/x",
+            pathParams: [],
+            queryParams: [{ name: "verbose", schema: { type: "boolean" as const } }],
+            isStreaming: false,
+            requestSchema: {
+                type: "object" as const,
+                required: ["name"],
+                properties: { name: { type: "string" as const } },
+            },
+        };
+        const render = buildRenderSchema(synthetic, {
+            httpMethod: "POST", httpPath: "/x",
+            methodChain: ["x", "create"], methodName: "create",
+            bodyWrapperKey: "body",
+        }, "typescript");
+        // `verbose` dropped — only the body field survives, wrapped under `body`.
+        expect(render.body?.fields.map((f) => f.jsonKey)).toEqual(["name"]);
+        expect(render.callTemplate).toBe(`client.x.create({ "body": { {{__body__}} } })`);
+    });
+
     test("list of objects: items.nested is populated for TS/Java", () => {
         const create = findSpec("POST", "/agent/create");
         // `tags: Tag[]` — list whose items are a $ref'd object type.

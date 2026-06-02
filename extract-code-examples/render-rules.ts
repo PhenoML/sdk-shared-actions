@@ -62,14 +62,22 @@ export function buildRenderSchema(
         // rendered call gets `client.X.list(tag="...")` for a query-only
         // endpoint and `client.X.create(name="...", tag="...")` for combined.
         //
-        // Exception: a passthrough body (e.g. a JSON Patch array as the wire
-        // payload) can't take named-field neighbors — the rendered call would
-        // emit `{ [...patches...], "tags": "..." }` which isn't valid TS or
-        // Python syntax. Real Fern doesn't generate this combination today;
-        // if it ever does, the warning surfaces it for investigation.
-        if (body && isPassthroughBody(body)) {
+        // Two body shapes can't absorb query params folded into `body.fields`:
+        //   - A passthrough body (e.g. a JSON Patch array as the wire payload):
+        //     the rendered call would emit `{ [...patches...], "tags": "..." }`,
+        //     invalid TS/Python syntax.
+        //   - A TS request-wrapper body (`bodyWrapperKey`): Fern places query
+        //     params as siblings of the `body:` key, not members of it, so
+        //     folding them in would wrongly nest the query inside the wrapper
+        //     (`{ body: { ...fields, query } }` instead of `{ body: {...}, query }`).
+        // Real Fern doesn't generate either combination today — FHIR's wrapped
+        // endpoints carry no query params, and query+body endpoints rest-spread
+        // the body inline (no wrapper). The warning surfaces it if that changes.
+        const passthrough = body !== undefined && isPassthroughBody(body);
+        if (passthrough || mapping.bodyWrapperKey) {
             console.error(
-                `  WARNING: endpoint ${spec.httpMethod} ${spec.httpPath} has a passthrough body ` +
+                `  WARNING: endpoint ${spec.httpMethod} ${spec.httpPath} has a ` +
+                `${mapping.bodyWrapperKey ? "wrapped" : "passthrough"} body ` +
                 `and ${spec.queryParams.length} query parameter(s) — query params dropped from render. ` +
                 `Fern doesn't generate this combination; verify the spec or extend render-rules.ts if it's intentional.`,
             );
