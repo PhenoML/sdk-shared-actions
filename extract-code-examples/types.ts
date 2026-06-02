@@ -26,6 +26,14 @@ export interface EndpointMapping {
     // etc.) — Fern's Python codegen typically uses `request`, but we read it
     // off the source rather than hard-coding the convention.
     bodyKwargForPassthrough?: string;
+    // TS only. Request-object key the SDK nests the wire body under. Fern's
+    // TS codegen inlines the body directly into the request object — UNLESS
+    // the endpoint also carries header/query members, in which case the body
+    // lives under a dedicated key (conventionally `body`) alongside them
+    // (e.g. FHIR `create(id, path, { body: <resource> })`). The renderer wraps
+    // the body slot in this key so the generated call sets the field the SDK
+    // actually reads. Undefined when the body is inlined.
+    bodyWrapperKey?: string;
 }
 
 // Per-endpoint data extracted from the OpenAPI spec.

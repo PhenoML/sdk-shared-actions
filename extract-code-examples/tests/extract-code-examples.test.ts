@@ -353,9 +353,34 @@ describe("tsExtractEndpoints", () => {
             "GET /agent/{id}/legacy",
             "GET /agent/{id}/subst",
             "POST /agent/create",
+            "POST /agent/inlined-rest",
             "POST /agent/legacy",
             "POST /agent/stream",
+            "POST /agent/wrapped",
         ]);
+    });
+
+    test("body wrapper key: property-bound body (`body: _body`) records the wrapper key", () => {
+        const file = path.join(FIXTURES, "typescript/src/api/resources/agent/client/Client.ts");
+        const endpoints = tsExtractEndpoints(file);
+        const wrapped = endpoints.find((e) => e.httpPath === "/agent/wrapped");
+        // Header member forces a `{ body: ... }` request wrapper — the renderer
+        // needs this to nest the payload the SDK actually reads.
+        expect(wrapped?.bodyWrapperKey).toBe("body");
+    });
+
+    test("body wrapper key: rest-bound body (`..._body`) stays inlined (no wrapper)", () => {
+        const file = path.join(FIXTURES, "typescript/src/api/resources/agent/client/Client.ts");
+        const endpoints = tsExtractEndpoints(file);
+        const inlinedRest = endpoints.find((e) => e.httpPath === "/agent/inlined-rest");
+        expect(inlinedRest?.bodyWrapperKey).toBeUndefined();
+    });
+
+    test("body wrapper key: whole-request body (`body: request`) is inlined (no wrapper)", () => {
+        const file = path.join(FIXTURES, "typescript/src/api/resources/agent/client/Client.ts");
+        const endpoints = tsExtractEndpoints(file);
+        const create = endpoints.find((e) => e.httpPath === "/agent/create");
+        expect(create?.bodyWrapperKey).toBeUndefined();
     });
 
     test("rebuilds template-literal paths with bare `{name}`", () => {
@@ -697,6 +722,88 @@ describe("buildRenderSchema", () => {
             expect(render.body?.fields.length).toBe(1);
             expect(render.body?.fields[0].passthroughBody).toBe(true);
         }
+    });
+
+    test("TypeScript: bodyWrapperKey nests a passthrough body under the request key", () => {
+        // FHIR create's wire body is `application/fhir+json {}` (passthrough),
+        // but the SDK request type wraps it: `create(id, path, { body: ... })`.
+        // Without the wrapper the body destructures to undefined → no HTTP body.
+        const union = findSpec("POST", "/agent/union");
+        const render = buildRenderSchema(union, {
+            httpMethod: "POST", httpPath: "/agent/union",
+            methodChain: ["agent", "union"], methodName: "union",
+            bodyWrapperKey: "body",
+        }, "typescript");
+        expect(render.body?.fields[0].passthroughBody).toBe(true);
+        expect(render.callTemplate).toBe(`client.agent.union({ "body": {{__body__}} })`);
+    });
+
+    test("TypeScript: bodyWrapperKey nests an inlined object body under the request key", () => {
+        const create = findSpec("POST", "/agent/create");
+        const render = buildRenderSchema(create, {
+            httpMethod: "POST", httpPath: "/agent/create",
+            methodChain: ["agent", "create"], methodName: "create",
+            bodyWrapperKey: "body",
+        }, "typescript");
+        // Object body: the inline `{ ... }` literal is itself nested under `body`.
+        expect(render.callTemplate).toBe(`client.agent.create({ "body": { {{__body__}} } })`);
+    });
+
+    test("bodyWrapperKey composes with path params (FHIR create shape) and is TS-only", () => {
+        // Mirror FHIR create: a path param plus an empty (passthrough) request
+        // schema. Asserts the wrapper slots in after the path arg, and that the
+        // TS-specific wrapper is ignored by Python (which uses a kwarg instead).
+        const synthetic = {
+            httpMethod: "POST", httpPath: "/fhir/{id}",
+            pathParams: [{ name: "id" }], queryParams: [], isStreaming: false,
+            requestSchema: {},
+        };
+        const ts = buildRenderSchema(synthetic, {
+            httpMethod: "POST", httpPath: "/fhir/{id}",
+            methodChain: ["fhir", "create"], methodName: "create",
+            bodyWrapperKey: "body",
+        }, "typescript");
+        expect(ts.body?.fields[0].passthroughBody).toBe(true);
+        expect(ts.callTemplate).toBe(`client.fhir.create({{id}}, { "body": {{__body__}} })`);
+
+        const py = buildRenderSchema(synthetic, {
+            httpMethod: "POST", httpPath: "/fhir/{id}",
+            methodChain: ["fhir", "create"], methodName: "create",
+            pathParamNames: ["id"],
+            bodyWrapperKey: "body",
+            bodyKwargForPassthrough: "request",
+        }, "python");
+        // Python never carries bodyWrapperKey in practice; the wrapper is a TS
+        // construct, so the kwarg rendering is unaffected.
+        expect(py.callTemplate).toBe("client.fhir.create(id={{id}}, request={{__body__}})");
+    });
+
+    test("bodyWrapperKey + query params: query is dropped, not nested inside the wrapper", () => {
+        // Fern places query params as siblings of the request wrapper's `body:`
+        // key (`{ body: {...}, verbose }`), but the render schema folds query
+        // into body.fields — which under a wrapper would wrongly nest them
+        // (`{ body: { ...fields, verbose } }`). Fern doesn't emit wrapper+query
+        // today, so (mirroring passthrough+query) the query is dropped rather
+        // than mis-rendered.
+        const synthetic = {
+            httpMethod: "POST", httpPath: "/x",
+            pathParams: [],
+            queryParams: [{ name: "verbose", schema: { type: "boolean" as const } }],
+            isStreaming: false,
+            requestSchema: {
+                type: "object" as const,
+                required: ["name"],
+                properties: { name: { type: "string" as const } },
+            },
+        };
+        const render = buildRenderSchema(synthetic, {
+            httpMethod: "POST", httpPath: "/x",
+            methodChain: ["x", "create"], methodName: "create",
+            bodyWrapperKey: "body",
+        }, "typescript");
+        // `verbose` dropped — only the body field survives, wrapped under `body`.
+        expect(render.body?.fields.map((f) => f.jsonKey)).toEqual(["name"]);
+        expect(render.callTemplate).toBe(`client.x.create({ "body": { {{__body__}} } })`);
     });
 
     test("list of objects: items.nested is populated for TS/Java", () => {

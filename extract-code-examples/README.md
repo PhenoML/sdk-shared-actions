@@ -15,8 +15,9 @@ authoritative for it:
 - **Schemas, request/response examples, path/query parameters,
   streaming flag** — from `openapi.json` (committed alongside the SDK by
   the [`bundle-openapi-spec`](../bundle-openapi-spec) action).
-- **SDK method chain, method name, Java request-class name** — from the
-  generated SDK source (per-language parsers under `parsers/`).
+- **SDK method chain, method name, Java request-class name, TypeScript
+  request-body wrapper key** — from the generated SDK source (per-language
+  parsers under `parsers/`).
 
 The two halves are joined by `(HTTP method, path)` and rendered through
 language-specific templates in `render-rules.ts`.
@@ -210,6 +211,37 @@ appropriate `kind` (`list` with `items` resolved, or `object`).
 `callTemplate` skips the `{ {{__body__}} }` wrapping in this branch
 (TypeScript) — the rendered body literal (`[...]` or `{...}`) supplies
 its own delimiters.
+
+#### TypeScript request-body wrapper
+
+Fern's TypeScript SDK normally inlines the request body straight into the
+request object — `client.agent.create({ name: "..." })`. But when an
+endpoint *also* carries header or query members, the body can't share that
+object's namespace, so Fern nests it under a dedicated key (conventionally
+`body`) alongside them:
+
+```ts
+client.fhir.create(fhirProviderId, fhirPath, { body: { resourceType: "Patient" } })
+```
+
+The wire body schema (`application/fhir+json`, a JSON Patch array, …) gives
+no hint of this — it's a pure codegen decision — so the TS parser reads it
+off the method source. Fern's `__method` impl destructures the request:
+
+- `body: request` (whole request is the wire body) → **inlined**, no wrapper.
+- `const { …headers, body: _body } = request` (property binding) → wrapper
+  key is `body`.
+- `const { …headers, ..._body } = request` (rest binding — the body fields
+  were spread in flat) → **inlined**, no wrapper.
+
+When a wrapper key is found it's recorded as `EndpointMapping.bodyWrapperKey`,
+and the renderer nests the body slot under it: passthrough bodies become
+`{ "body": [...] }` / `{ "body": {...} }`, inlined object bodies become
+`{ "body": { "key": value } }`. The `body.fields` catalog and
+`example.request.body` stay **unwrapped** — they describe the payload itself;
+the wrapper is purely the call-site envelope, encoded in `callTemplate`. This
+is a TypeScript-only concern (Python inlines the fields as kwargs; Java wraps
+via its request-class builder).
 
 #### Schema completeness
 

@@ -62,14 +62,22 @@ export function buildRenderSchema(
         // rendered call gets `client.X.list(tag="...")` for a query-only
         // endpoint and `client.X.create(name="...", tag="...")` for combined.
         //
-        // Exception: a passthrough body (e.g. a JSON Patch array as the wire
-        // payload) can't take named-field neighbors — the rendered call would
-        // emit `{ [...patches...], "tags": "..." }` which isn't valid TS or
-        // Python syntax. Real Fern doesn't generate this combination today;
-        // if it ever does, the warning surfaces it for investigation.
-        if (body && isPassthroughBody(body)) {
+        // Two body shapes can't absorb query params folded into `body.fields`:
+        //   - A passthrough body (e.g. a JSON Patch array as the wire payload):
+        //     the rendered call would emit `{ [...patches...], "tags": "..." }`,
+        //     invalid TS/Python syntax.
+        //   - A TS request-wrapper body (`bodyWrapperKey`): Fern places query
+        //     params as siblings of the `body:` key, not members of it, so
+        //     folding them in would wrongly nest the query inside the wrapper
+        //     (`{ body: { ...fields, query } }` instead of `{ body: {...}, query }`).
+        // Real Fern doesn't generate either combination today — FHIR's wrapped
+        // endpoints carry no query params, and query+body endpoints rest-spread
+        // the body inline (no wrapper). The warning surfaces it if that changes.
+        const passthrough = body !== undefined && isPassthroughBody(body);
+        if (passthrough || mapping.bodyWrapperKey) {
             console.error(
-                `  WARNING: endpoint ${spec.httpMethod} ${spec.httpPath} has a passthrough body ` +
+                `  WARNING: endpoint ${spec.httpMethod} ${spec.httpPath} has a ` +
+                `${mapping.bodyWrapperKey ? "wrapped" : "passthrough"} body ` +
                 `and ${spec.queryParams.length} query parameter(s) — query params dropped from render. ` +
                 `Fern doesn't generate this combination; verify the spec or extend render-rules.ts if it's intentional.`,
             );
@@ -182,14 +190,39 @@ function bodySlotFor(body: BodySchema, language: Language, mapping: EndpointMapp
     // entirely. We use the kwarg name the parser observed on the method
     // signature, falling back to `request` (the Fern convention) only when
     // the parser didn't extract anything.
+    // Compute the bare TS slot first, then apply the request-wrapper envelope
+    // once at the end (see tsWrapBody) — wrapping is a cross-cutting TS step,
+    // not a per-shape decision, so it lives in a single place no future branch
+    // can forget. Non-TS languages return their slot directly below.
+    let slot: string;
     if (isPassthroughBody(body)) {
-        if (language !== "python") return "{{__body__}}";
-        const kwarg = mapping.bodyKwargForPassthrough ?? "request";
-        return `${kwarg}={{__body__}}`;
+        // Passthrough renders a self-delimiting literal (`[...]` / `{...}`), so
+        // the slot is the bare body. Python is the exception — its SDK takes
+        // the body as a named kwarg, so it returns the kwarg form directly.
+        if (language === "python") {
+            const kwarg = mapping.bodyKwargForPassthrough ?? "request";
+            return `${kwarg}={{__body__}}`;
+        }
+        slot = "{{__body__}}";
+    } else if (language === "java" && mapping.requestClassName) {
+        return javaBuilderWrap(mapping.requestClassName);
+    } else if (language === "typescript") {
+        slot = "{ {{__body__}} }";
+    } else {
+        return "{{__body__}}";
     }
-    if (language === "java" && mapping.requestClassName) return javaBuilderWrap(mapping.requestClassName);
-    if (language === "typescript") return "{ {{__body__}} }";
-    return "{{__body__}}";
+    return language === "typescript" ? tsWrapBody(slot, mapping) : slot;
+}
+
+// Fern's TS SDK normally inlines the body into the request object. When the
+// endpoint also carries header/query members, the body instead sits under a
+// dedicated key (e.g. `create(id, path, { body: <resource> })`); the parser
+// records that key as `bodyWrapperKey`. Nest the slot under it so the call sets
+// the field the SDK reads — otherwise the body destructures to `undefined` and
+// no HTTP body is sent. No-op when the body is inlined (`bodyWrapperKey` unset).
+function tsWrapBody(inner: string, mapping: EndpointMapping): string {
+    if (!mapping.bodyWrapperKey) return inner;
+    return `{ ${JSON.stringify(mapping.bodyWrapperKey)}: ${inner} }`;
 }
 
 function isPassthroughBody(body: BodySchema): boolean {
