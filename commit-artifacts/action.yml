@@ -29,17 +29,25 @@ runs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        # Stage each requested path. `git add` is a no-op for unchanged files,
-        # so listing a path that didn't change is harmless.
+        # Collect the requested paths (newline-separated; skip blank lines).
+        paths=()
         while IFS= read -r path; do
           [ -n "$path" ] || continue
-          git add -- "$path"
+          paths+=("$path")
         done <<< "$PATHS"
-        # --cached so brand-new (previously untracked) files count as changes;
-        # plain `git diff` would report nothing for them.
-        if git diff --cached --quiet; then
-          echo "No staged changes; nothing to commit."
+        if [ "${#paths[@]}" -eq 0 ]; then
+          echo "::error::commit-artifacts: no paths given"
+          exit 1
+        fi
+        # Stage the listed paths (so brand-new files are tracked), then scope
+        # BOTH the change check and the commit to exactly those paths — never
+        # the whole index — so an unrelated file staged by an earlier step
+        # can't ride along in this commit. `--cached` counts new files as
+        # changes; `git commit -- <paths>` records only the listed paths.
+        git add -- "${paths[@]}"
+        if git diff --cached --quiet -- "${paths[@]}"; then
+          echo "No changes to the listed paths; nothing to commit."
           exit 0
         fi
-        git commit -m "$MESSAGE"
+        git commit -m "$MESSAGE" -- "${paths[@]}"
         bash "$PUSH_WITH_RETRY"
