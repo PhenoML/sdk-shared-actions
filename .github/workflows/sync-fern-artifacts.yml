@@ -8,9 +8,11 @@ name: sync-fern-artifacts
 # (extract reading a stale spec) and never self-heal (a GITHUB_TOKEN push from
 # bundle does not re-trigger extract).
 #
-# The sibling composite actions below are pinned to the immutable 1.0.0 release
-# tag, so a given version of this workflow always runs the same action
-# versions rather than drifting with main; bump them in lockstep on release.
+# The sibling composite actions below are pinned to an immutable release tag,
+# so a given version of this workflow always runs the same action versions
+# rather than drifting with main. release-please keeps these pins in lockstep
+# with the release: the `# x-release-please-version` markers make it rewrite
+# each pin to the new version in the release PR (see release-please.yml).
 on:
   workflow_call:
     inputs:
@@ -54,20 +56,20 @@ jobs:
       #    the originGitCommit it fetched as an output for the commit message.
       - name: Bundle OpenAPI spec
         id: bundle
-        uses: PhenoML/sdk-shared-actions/bundle-openapi-spec@1.0.0
+        uses: PhenoML/sdk-shared-actions/bundle-openapi-spec@1.0.0 # x-release-please-version
         with:
           metadata-path: ${{ env.METADATA_PATH }}
           output-path: ${{ env.SPEC_PATH }}
 
       # 2) Read the spec just written; write code-examples.json (no commit).
       - name: Extract code examples
-        uses: PhenoML/sdk-shared-actions/extract-code-examples@1.0.0
+        uses: PhenoML/sdk-shared-actions/extract-code-examples@1.0.0 # x-release-please-version
         with:
           spec: ${{ env.SPEC_PATH }}
 
       # 3) One commit + push for both generated files.
       - name: Commit generated artifacts
-        uses: PhenoML/sdk-shared-actions/commit-artifacts@1.0.0
+        uses: PhenoML/sdk-shared-actions/commit-artifacts@1.0.0 # x-release-please-version
         with:
           paths: |
             ${{ env.SPEC_PATH }}
