@@ -9,7 +9,7 @@ commit Fern recorded in `.fern/metadata.json`.
 In the publish job of each SDK's existing CI workflow:
 
 ```yaml
-- uses: PhenoML/sdk-shared-actions/verify-openapi-spec@v1
+- uses: PhenoML/sdk-shared-actions/verify-openapi-spec@1.0.0
 ```
 
 See [`action.yml`](action.yml) for inputs.

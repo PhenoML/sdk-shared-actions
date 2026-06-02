@@ -37,30 +37,27 @@ Default spec paths (matching [`bundle-openapi-spec`](../bundle-openapi-spec)):
 
 ## Usage
 
-```yaml
-name: Extract Code Examples
-on:
-  pull_request:
-    types: [opened, synchronize]
+This action reads the bundled `openapi.json` and **writes** `code-examples.json`
+to the working tree — it does **not** commit. Because the manifest is derived
+from the spec, it must run *after* [`bundle-openapi-spec`](../bundle-openapi-spec)
+has written the current spec, and the result should be committed alongside the
+spec. The [`sync-fern-artifacts`](../.github/workflows/sync-fern-artifacts.yml)
+reusable workflow wires up that ordering (bundle → extract → commit in one run);
+prefer it over invoking this action directly:
 
+```yaml
 jobs:
-  extract:
-    runs-on: ubuntu-latest
+  sync:
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.head_ref }}
-
-      - uses: PhenoML/sdk-shared-actions/extract-code-examples@v1
+    uses: PhenoML/sdk-shared-actions/.github/workflows/sync-fern-artifacts.yml@1.0.0
+    with:
+      spec-path: openapi/openapi.json
 ```
 
-The action commits `code-examples.json` and pushes it back to the PR
-branch when the manifest changes (retrying on non-fast-forward so it
-co-exists with anything else — another workflow, a human — pushing to
-the same branch concurrently). The caller must check out the PR branch
-with `contents: write` permission.
+To run the extractor on its own, check out the PR branch (with
+`contents: write`), `uses: PhenoML/sdk-shared-actions/extract-code-examples@1.0.0`,
+then commit with [`commit-artifacts`](../commit-artifacts).
 
 ## Manifest schema
 

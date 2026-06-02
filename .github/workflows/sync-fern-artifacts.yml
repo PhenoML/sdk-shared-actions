@@ -1,0 +1,75 @@
+name: sync-fern-artifacts
+
+# Reusable workflow: bundle the OpenAPI spec, extract code examples from it,
+# then commit BOTH in a single push — in one run, in this order. Ordering is a
+# within-job data dependency (extract reads the file bundle just wrote), so it
+# does not rely on one workflow re-triggering another. This is what each SDK
+# repo calls instead of separate bundle / extract workflows, which could race
+# (extract reading a stale spec) and never self-heal (a GITHUB_TOKEN push from
+# bundle does not re-trigger extract).
+#
+# The sibling composite actions below are pinned to the immutable 1.0.0 release
+# tag, so a given version of this workflow always runs the same action
+# versions rather than drifting with main; bump them in lockstep on release.
+on:
+  workflow_call:
+    inputs:
+      spec-path:
+        description: "Where the bundled OpenAPI spec is written AND read from."
+        type: string
+        required: true
+      metadata-path:
+        description: "Path to Fern's metadata.json (source of originGitCommit)."
+        type: string
+        default: ".fern/metadata.json"
+
+permissions:
+  contents: write
+
+# Serialize per PR head branch and supersede in-flight runs: only the latest
+# commit's spec is bundled+extracted, always within a single run. Because the
+# surviving run does all three steps atomically, a cancelled run never leaves a
+# half-applied spec/examples pair behind.
+concurrency:
+  group: sync-fern-artifacts-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Fork PRs can't push back to the head branch and we won't leak the write
+    # token to forked code. Fern's bot opens PRs from same-repo branches.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      SPEC_PATH: ${{ inputs.spec-path }}
+      METADATA_PATH: ${{ inputs.metadata-path }}
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ env.HEAD_REF }}
+
+      # 1) Fetch + write the spec to the working tree (no commit). Surfaces
+      #    the originGitCommit it fetched as an output for the commit message.
+      - name: Bundle OpenAPI spec
+        id: bundle
+        uses: PhenoML/sdk-shared-actions/bundle-openapi-spec@1.0.0
+        with:
+          metadata-path: ${{ env.METADATA_PATH }}
+          output-path: ${{ env.SPEC_PATH }}
+
+      # 2) Read the spec just written; write code-examples.json (no commit).
+      - name: Extract code examples
+        uses: PhenoML/sdk-shared-actions/extract-code-examples@1.0.0
+        with:
+          spec: ${{ env.SPEC_PATH }}
+
+      # 3) One commit + push for both generated files.
+      - name: Commit generated artifacts
+        uses: PhenoML/sdk-shared-actions/commit-artifacts@1.0.0
+        with:
+          paths: |
+            ${{ env.SPEC_PATH }}
+            code-examples.json
+          message: "chore: sync OpenAPI spec + code-examples for ${{ steps.bundle.outputs.origin-commit }}"

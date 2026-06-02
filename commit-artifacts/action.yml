@@ -1,0 +1,53 @@
+name: Commit artifacts
+description: >-
+  Stages the given paths, commits them with the provided message, and pushes
+  to the current branch — retrying on non-fast-forward by rebasing onto the
+  new remote tip so it co-exists with anything else (another workflow, a human)
+  pushing to the same branch concurrently. No-ops when the staged paths carry
+  no changes. Assumes the caller has already checked out the target branch
+  (with auth) and granted contents: write.
+
+inputs:
+  paths:
+    description: >-
+      Newline-separated list of files to stage and commit. Brand-new
+      (previously untracked) files are detected too.
+    required: true
+  message:
+    description: "Commit message."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Commit and push artifacts
+      shell: bash
+      env:
+        PATHS: ${{ inputs.paths }}
+        MESSAGE: ${{ inputs.message }}
+        PUSH_WITH_RETRY: ${{ github.action_path }}/push-with-retry.sh
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        # Collect the requested paths (newline-separated; skip blank lines).
+        paths=()
+        while IFS= read -r path; do
+          [ -n "$path" ] || continue
+          paths+=("$path")
+        done <<< "$PATHS"
+        if [ "${#paths[@]}" -eq 0 ]; then
+          echo "::error::commit-artifacts: no paths given"
+          exit 1
+        fi
+        # Stage the listed paths (so brand-new files are tracked), then scope
+        # BOTH the change check and the commit to exactly those paths — never
+        # the whole index — so an unrelated file staged by an earlier step
+        # can't ride along in this commit. `--cached` counts new files as
+        # changes; `git commit -- <paths>` records only the listed paths.
+        git add -- "${paths[@]}"
+        if git diff --cached --quiet -- "${paths[@]}"; then
+          echo "No changes to the listed paths; nothing to commit."
+          exit 0
+        fi
+        git commit -m "$MESSAGE" -- "${paths[@]}"
+        bash "$PUSH_WITH_RETRY"
