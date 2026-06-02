@@ -58,6 +58,37 @@ export class AgentClient {
         return _response;
     }
 
+    // Fern request wrapper: a header member forces the body under a dedicated
+    // `body` key (`body: _body` property binding). The decoy error literal
+    // below also has a `body:` — the parser must read the fetcher literal's,
+    // not the error one's.
+    public wrapped(request: { body: unknown }): Promise<unknown> { return this.__wrapped(request); }
+    private async __wrapped(request: { body: unknown }): Promise<unknown> {
+        const { "X-Trace-Id": _traceId, body: _body } = request;
+        const _response = await core.fetcher({
+            url: core.url.join(this._options.baseUrl, "agent/wrapped"),
+            method: "POST",
+            body: _body,
+        });
+        if (!_response.ok) {
+            throw new Error(JSON.stringify({ statusCode: 500, body: _response.error }));
+        }
+        return _response;
+    }
+
+    // Fern inlines the body when the wrapper spreads it in (`..._body` rest
+    // binding) alongside header members — no `body` key, body fields stay flat.
+    public inlinedRest(request: { name: string }): Promise<unknown> { return this.__inlinedRest(request); }
+    private async __inlinedRest(request: { name: string }): Promise<unknown> {
+        const { "X-Trace-Id": _traceId, ..._body } = request;
+        const _response = await core.fetcher({
+            url: core.url.join(this._options.baseUrl, "agent/inlined-rest"),
+            method: "POST",
+            body: _body,
+        });
+        return _response;
+    }
+
     // Legacy Fern shape: direct string-literal URL with embedded host.
     public legacyString(): Promise<unknown> { return this.__legacyString(); }
     private async __legacyString(): Promise<unknown> {

@@ -182,14 +182,39 @@ function bodySlotFor(body: BodySchema, language: Language, mapping: EndpointMapp
     // entirely. We use the kwarg name the parser observed on the method
     // signature, falling back to `request` (the Fern convention) only when
     // the parser didn't extract anything.
+    // Compute the bare TS slot first, then apply the request-wrapper envelope
+    // once at the end (see tsWrapBody) — wrapping is a cross-cutting TS step,
+    // not a per-shape decision, so it lives in a single place no future branch
+    // can forget. Non-TS languages return their slot directly below.
+    let slot: string;
     if (isPassthroughBody(body)) {
-        if (language !== "python") return "{{__body__}}";
-        const kwarg = mapping.bodyKwargForPassthrough ?? "request";
-        return `${kwarg}={{__body__}}`;
+        // Passthrough renders a self-delimiting literal (`[...]` / `{...}`), so
+        // the slot is the bare body. Python is the exception — its SDK takes
+        // the body as a named kwarg, so it returns the kwarg form directly.
+        if (language === "python") {
+            const kwarg = mapping.bodyKwargForPassthrough ?? "request";
+            return `${kwarg}={{__body__}}`;
+        }
+        slot = "{{__body__}}";
+    } else if (language === "java" && mapping.requestClassName) {
+        return javaBuilderWrap(mapping.requestClassName);
+    } else if (language === "typescript") {
+        slot = "{ {{__body__}} }";
+    } else {
+        return "{{__body__}}";
     }
-    if (language === "java" && mapping.requestClassName) return javaBuilderWrap(mapping.requestClassName);
-    if (language === "typescript") return "{ {{__body__}} }";
-    return "{{__body__}}";
+    return language === "typescript" ? tsWrapBody(slot, mapping) : slot;
+}
+
+// Fern's TS SDK normally inlines the body into the request object. When the
+// endpoint also carries header/query members, the body instead sits under a
+// dedicated key (e.g. `create(id, path, { body: <resource> })`); the parser
+// records that key as `bodyWrapperKey`. Nest the slot under it so the call sets
+// the field the SDK reads — otherwise the body destructures to `undefined` and
+// no HTTP body is sent. No-op when the body is inlined (`bodyWrapperKey` unset).
+function tsWrapBody(inner: string, mapping: EndpointMapping): string {
+    if (!mapping.bodyWrapperKey) return inner;
+    return `{ ${JSON.stringify(mapping.bodyWrapperKey)}: ${inner} }`;
 }
 
 function isPassthroughBody(body: BodySchema): boolean {
