@@ -40,8 +40,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ env.HEAD_REF }}
-      - uses: PhenoML/sdk-shared-actions/bundle-openapi-spec@v1
-      - uses: PhenoML/sdk-shared-actions/commit-artifacts@v1
+      - uses: PhenoML/sdk-shared-actions/bundle-openapi-spec@1.0.0
+      - uses: PhenoML/sdk-shared-actions/commit-artifacts@1.0.0
         with:
           paths: openapi/openapi.json
           message: "chore: bundle OpenAPI spec"

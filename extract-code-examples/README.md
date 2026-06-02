@@ -49,13 +49,13 @@ jobs:
   sync:
     permissions:
       contents: write
-    uses: PhenoML/sdk-shared-actions/.github/workflows/sync-fern-artifacts.yml@v1
+    uses: PhenoML/sdk-shared-actions/.github/workflows/sync-fern-artifacts.yml@1.0.0
     with:
       spec-path: openapi/openapi.json
 ```
 
 To run the extractor on its own, check out the PR branch (with
-`contents: write`), `uses: PhenoML/sdk-shared-actions/extract-code-examples@v1`,
+`contents: write`), `uses: PhenoML/sdk-shared-actions/extract-code-examples@1.0.0`,
 then commit with [`commit-artifacts`](../commit-artifacts).
 
 ## Manifest schema

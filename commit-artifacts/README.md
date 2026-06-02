@@ -21,7 +21,7 @@ without the other.
   with:
     ref: ${{ github.event.pull_request.head.ref }}
 # ... steps that generate/modify the artifacts ...
-- uses: PhenoML/sdk-shared-actions/commit-artifacts@v1
+- uses: PhenoML/sdk-shared-actions/commit-artifacts@1.0.0
   with:
     paths: |
       openapi/openapi.json
