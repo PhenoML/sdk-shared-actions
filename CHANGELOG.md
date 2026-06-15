@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.0...1.0.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* **release-please:** use GitHub App token so the release PR can bump workflow pins ([#30](https://github.com/PhenoML/sdk-shared-actions/issues/30)) ([f7a5f50](https://github.com/PhenoML/sdk-shared-actions/commit/f7a5f50cfc50d6f8337a9b4f86ab09b948e068b8))
+* **sync-fern-artifacts:** suppress approval-gated commit-back re-run ([#29](https://github.com/PhenoML/sdk-shared-actions/issues/29)) ([9621454](https://github.com/PhenoML/sdk-shared-actions/commit/9621454f36455ce2304d65cf392758198b956c77))
+
 ## 1.0.0 (2026-06-02)
 
 
