@@ -68,10 +68,20 @@ jobs:
           spec: ${{ env.SPEC_PATH }}
 
       # 3) One commit + push for both generated files.
+      #
+      #    The message ends with a `[skip ci]` marker. This commit-back is a
+      #    github-actions[bot] push; on a public repo GitHub creates an
+      #    approval-gated ("action_required") placeholder run for it *before*
+      #    path filters or the GITHUB_TOKEN loop-break get a chance to suppress
+      #    it — so the caller's paths-ignore can't stop the phantom "1 workflow
+      #    awaiting approval" run, only neuter it once approved. `[skip ci]` is
+      #    honored at event ingestion, before any run (and thus any gate) is
+      #    created, so the re-run never appears. It only skips Actions workflow
+      #    runs, not webhook-driven checks (e.g. Bugbot), which still fire.
       - name: Commit generated artifacts
         uses: PhenoML/sdk-shared-actions/commit-artifacts@1.0.0 # x-release-please-version
         with:
           paths: |
             ${{ env.SPEC_PATH }}
             code-examples.json
-          message: "chore: sync OpenAPI spec + code-examples for ${{ steps.bundle.outputs.origin-commit }}"
+          message: "chore: sync OpenAPI spec + code-examples for ${{ steps.bundle.outputs.origin-commit }} [skip ci]"
