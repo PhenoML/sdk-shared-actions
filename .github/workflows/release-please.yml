@@ -14,6 +14,15 @@ name: release-please
 # Current version: .release-please-manifest.json.
 # Tags are unprefixed (1.0.0, not v1.0.0) to match how the actions are
 # referenced throughout this repo (include-v-in-tag: false in the config).
+#
+# Token: because the release PR rewrites the action pins *inside*
+# sync-fern-artifacts.yml, release-please has to commit a file under
+# .github/workflows/. GitHub forbids the default GITHUB_TOKEN from writing
+# workflow files ("without `workflows` permission"), and `workflows` is not a
+# grantable scope on GITHUB_TOKEN — so it fails with "Error adding to tree".
+# We mint a GitHub App token instead; the App must have Contents, Pull
+# requests, Issues and Workflows = write. Set RELEASE_PLEASE_APP_ID and
+# RELEASE_PLEASE_APP_PRIVATE_KEY repo secrets to the App's credentials.
 
 on:
   push:
@@ -28,4 +37,11 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
