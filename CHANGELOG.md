@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.1...1.0.2) (2026-06-15)
+
+
+### Bug Fixes
+
+* **release-please:** use client-id for create-github-app-token ([#32](https://github.com/PhenoML/sdk-shared-actions/issues/32)) ([7b9605a](https://github.com/PhenoML/sdk-shared-actions/commit/7b9605a49008ae4a7d325f2cd6b5eaf872a0c2e8))
+
 ## [1.0.1](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.0...1.0.1) (2026-06-15)
 
 
