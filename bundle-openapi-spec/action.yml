@@ -1,7 +1,7 @@
 name: Bundle OpenAPI spec
 description: >-
   Fetches the combined OpenAPI spec for an SDK's source commit from the
-  public phenoml-openapi-specs GCS bucket and writes it to the working tree.
+  public phenoml-public-openapi-specs GCS bucket and writes it to the working tree.
   Committing is left to a separate step (see commit-artifacts) so the spec and
   other generated artifacts can be written back in a single commit. Assumes the
   caller has already checked out the target branch.
@@ -46,4 +46,4 @@ runs:
         curl --fail --silent --show-error \
           --retry 60 --retry-delay 5 --retry-max-time 300 --retry-all-errors \
           -o "$OUTPUT_PATH" \
-          "https://storage.googleapis.com/phenoml-openapi-specs/combined/specs-${commit_sha}.json"
+          "https://storage.googleapis.com/phenoml-public-openapi-specs/combined/specs-${commit_sha}.json"
