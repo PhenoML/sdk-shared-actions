@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.2...1.0.3) (2026-06-25)
+
+
+### Bug Fixes
+
+* **bundle-openapi-spec:** fetch specs from public bucket ([#35](https://github.com/PhenoML/sdk-shared-actions/issues/35)) ([84e6d11](https://github.com/PhenoML/sdk-shared-actions/commit/84e6d11fc5317e3996fd818dd26ed6b6b52275f4))
+
 ## [1.0.2](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.1...1.0.2) (2026-06-15)
 
 
