@@ -1,7 +1,7 @@
 # bundle-openapi-spec
 
 Composite action. Fetches the combined OpenAPI spec for an SDK's source
-commit (Fern's `originGitCommit`) from the public `phenoml-openapi-specs`
+commit (Fern's `originGitCommit`) from the public `phenoml-public-openapi-specs`
 GCS bucket and writes it to the working tree. Retries up to ~5 minutes to
 absorb the race between Fern opening the SDK PR and the upstream
 spec-publish workflow finishing.
