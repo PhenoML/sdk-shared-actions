@@ -157,7 +157,7 @@ jobs:
             exit 1
           fi
 
-          origin_tag="fern-origin/${origin_commit}/${VERSION_TAG}"
+          origin_tag="backend-origin/${origin_commit}/${VERSION_TAG}"
           if [[ "$origin_tag" == -* ]]; then
             echo "::error::Origin tag must not begin with '-': $origin_tag"
             exit 1

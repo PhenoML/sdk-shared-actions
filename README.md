@@ -23,7 +23,7 @@ Shared GitHub Actions and reusable workflows for the Phenoml SDK repos.
   shared pre-publish release gate for generated SDKs: extract the SDK version,
   report whether the release should publish, repair metadata, or skip, read
   Fern's `originGitCommit`, verify the bundled OpenAPI spec for new publishes,
-  and validate the prefixed `fern-origin/<originGitCommit>/<version_tag>`
+  and validate the prefixed `backend-origin/<originGitCommit>/<version_tag>`
   release tag name. Version tags, origin release tags, GitHub releases, package
   builds, and registry publish jobs stay in each SDK repo.
 - [`sdk-release-finalize`](.github/workflows/sdk-release-finalize.yml) —
