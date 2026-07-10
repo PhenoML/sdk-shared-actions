@@ -17,7 +17,7 @@ on:
         type: string
         required: true
       origin-tag:
-        description: "The originGitCommit tag to create, usually sdk-release-gate's origin_tag output."
+        description: "The origin release tag to create, usually sdk-release-gate's origin_tag output."
         type: string
         required: true
       tag-target:
@@ -36,10 +36,10 @@ on:
         description: "true when a new version tag or release was created; false when it already existed."
         value: ${{ jobs.finalize.outputs.version_tag_created }}
       origin_tag:
-        description: "The originGitCommit tag created or verified by this workflow."
+        description: "The origin release tag created or verified by this workflow."
         value: ${{ jobs.finalize.outputs.origin_tag }}
       origin_tag_created:
-        description: "true when a new origin tag was pushed; false when it already existed."
+        description: "true when a new origin release tag was pushed; false when it already existed."
         value: ${{ jobs.finalize.outputs.origin_tag_created }}
 
 permissions:
@@ -194,7 +194,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$ORIGIN_TAG" "$target_commit" -m "Release for Fern originGitCommit $ORIGIN_COMMIT"
+          git tag -a "$ORIGIN_TAG" "$target_commit" -m "Release $VERSION_TAG for Fern originGitCommit $ORIGIN_COMMIT"
           git push origin "refs/tags/$ORIGIN_TAG"
 
           echo "created=true" >> "$GITHUB_OUTPUT"

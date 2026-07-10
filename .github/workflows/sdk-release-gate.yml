@@ -2,10 +2,11 @@ name: sdk-release-gate
 
 # Reusable workflow: perform the shared SDK release gate used before package
 # publishing. It extracts the generated SDK version, checks whether that
-# version is already tagged, verifies the bundled OpenAPI spec, and validates
-# Fern's originGitCommit tag name. It intentionally does not create release
-# tags or GitHub releases: callers should do that after registry publishing
-# succeeds so failed publishes can be retried for the same version.
+# version is already tagged, reads Fern's originGitCommit, verifies the bundled
+# OpenAPI spec, and validates the origin release tag name. It intentionally
+# does not create release tags or GitHub releases: callers should do that after
+# registry publishing succeeds so failed publishes can be retried for the same
+# version.
 on:
   workflow_call:
     inputs:
@@ -30,7 +31,7 @@ on:
         type: string
         default: ""
       origin-tag-prefix:
-        description: "Optional prefix to prepend to originGitCommit when naming the origin tag."
+        description: "Optional prefix to prepend to the origin tag, before originGitCommit/version_tag."
         type: string
         default: ""
     outputs:
@@ -47,7 +48,7 @@ on:
         description: "The originGitCommit value read from metadata.json."
         value: ${{ jobs.check.outputs.origin_commit }}
       origin_tag:
-        description: "The validated originGitCommit tag name."
+        description: "The validated origin release tag name."
         value: ${{ jobs.check.outputs.origin_tag }}
 
 permissions:
@@ -130,6 +131,40 @@ jobs:
             echo "version_tag=$version_tag"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Read originGitCommit
+        id: origin
+        env:
+          VERSION_TAG: ${{ steps.version.outputs.version_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$METADATA_PATH" ]]; then
+            echo "::error::$METADATA_PATH does not exist."
+            exit 1
+          fi
+
+          origin_commit=$(jq -r '.originGitCommit // empty' "$METADATA_PATH")
+          if [[ -z "$origin_commit" ]]; then
+            echo "::error::$METADATA_PATH has no originGitCommit field."
+            exit 1
+          fi
+
+          origin_tag="${ORIGIN_TAG_PREFIX}${origin_commit}/${VERSION_TAG}"
+          if [[ "$origin_tag" == -* ]]; then
+            echo "::error::Origin tag must not begin with '-': $origin_tag"
+            exit 1
+          fi
+          if ! git check-ref-format "refs/tags/$origin_tag"; then
+            echo "::error::originGitCommit produced an invalid Git tag name: $origin_tag"
+            exit 1
+          fi
+
+          {
+            echo "origin_commit=$origin_commit"
+            echo "origin_tag=$origin_tag"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Check version tag
         id: check
         env:
@@ -151,36 +186,3 @@ jobs:
         with:
           metadata-path: ${{ env.METADATA_PATH }}
           spec-path: ${{ env.SPEC_PATH }}
-
-      - name: Read originGitCommit
-        id: origin
-        if: steps.check.outputs.should_publish == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [[ ! -f "$METADATA_PATH" ]]; then
-            echo "::error::$METADATA_PATH does not exist."
-            exit 1
-          fi
-
-          origin_commit=$(jq -r '.originGitCommit // empty' "$METADATA_PATH")
-          if [[ -z "$origin_commit" ]]; then
-            echo "::error::$METADATA_PATH has no originGitCommit field."
-            exit 1
-          fi
-
-          origin_tag="${ORIGIN_TAG_PREFIX}${origin_commit}"
-          if [[ "$origin_tag" == -* ]]; then
-            echo "::error::Origin tag must not begin with '-': $origin_tag"
-            exit 1
-          fi
-          if ! git check-ref-format "refs/tags/$origin_tag"; then
-            echo "::error::originGitCommit produced an invalid Git tag name: $origin_tag"
-            exit 1
-          fi
-
-          {
-            echo "origin_commit=$origin_commit"
-            echo "origin_tag=$origin_tag"
-          } >> "$GITHUB_OUTPUT"
