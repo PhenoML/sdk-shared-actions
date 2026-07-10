@@ -1,7 +1,8 @@
 name: sdk-release-finalize
 
 # Reusable workflow: create release-discovery tags after registry publishing
-# succeeds. Call this from SDK repos after npm/PyPI/Maven publish completes,
+# succeeds and preserve Fern's current replay generation commit for the next
+# autorelease. Call this from SDK repos after npm/PyPI/Maven publish completes,
 # passing the version_tag, origin_commit, and origin_tag outputs from
 # sdk-release-gate. Keeping these side effects post-publish means failed
 # registry publishes can be retried without a pre-created tag blocking them.
@@ -24,6 +25,10 @@ on:
         description: "Git revision to tag. Defaults to the caller workflow commit."
         type: string
         default: "HEAD"
+      replay-lock-path:
+        description: "Path to Fern's replay.lock within the caller repo."
+        type: string
+        default: ".fern/replay.lock"
       create-github-release:
         description: "Whether to create a GitHub release for the version tag."
         type: boolean
@@ -41,6 +46,12 @@ on:
       origin_tag_created:
         description: "true when a new origin release tag was pushed; false when it already existed."
         value: ${{ jobs.finalize.outputs.origin_tag_created }}
+      fern_generation_tag:
+        description: "The Fern replay generation tag created or verified by this workflow, or empty when replay.lock is absent."
+        value: ${{ jobs.finalize.outputs.fern_generation_tag }}
+      fern_generation_tag_created:
+        description: "true when a new Fern replay generation tag was pushed; false when it already existed or replay.lock is absent."
+        value: ${{ jobs.finalize.outputs.fern_generation_tag_created }}
 
 permissions:
   contents: write
@@ -53,11 +64,14 @@ jobs:
       version_tag_created: ${{ steps.version-tag-output.outputs.created }}
       origin_tag: ${{ steps.inputs.outputs.origin_tag }}
       origin_tag_created: ${{ steps.origin-tag.outputs.created }}
+      fern_generation_tag: ${{ steps.fern-generation-tag.outputs.tag }}
+      fern_generation_tag_created: ${{ steps.fern-generation-tag.outputs.created }}
     env:
       VERSION_TAG: ${{ inputs.version-tag }}
       ORIGIN_COMMIT: ${{ inputs.origin-commit }}
       ORIGIN_TAG: ${{ inputs.origin-tag }}
       TAG_TARGET: ${{ inputs.tag-target }}
+      REPLAY_LOCK_PATH: ${{ inputs.replay-lock-path }}
     steps:
       - name: Checkout release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -198,3 +212,67 @@ jobs:
           git push origin "refs/tags/$ORIGIN_TAG"
 
           echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve Fern replay generation
+        id: fern-generation-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
+          if ! replay_lock=$(git show "${release_commit}:${REPLAY_LOCK_PATH}" 2>/dev/null); then
+            echo "::notice::$REPLAY_LOCK_PATH does not exist at $release_commit; skipping Fern replay generation tag."
+            {
+              echo "tag="
+              echo "created=false"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          generation_commit=$(printf '%s\n' "$replay_lock" | sed -n 's/^current_generation:[[:space:]]*//p' | head -n1)
+          if [[ -z "$generation_commit" ]]; then
+            echo "::error::$REPLAY_LOCK_PATH at $release_commit has no current_generation field."
+            exit 1
+          fi
+          if ! printf '%s' "$generation_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Invalid Fern current_generation SHA: $generation_commit"
+            exit 1
+          fi
+
+          generation_tag="fern-generation/$generation_commit"
+          if ! git check-ref-format "refs/tags/$generation_tag"; then
+            echo "::error::Invalid Fern generation tag name: $generation_tag"
+            exit 1
+          fi
+
+          if ! target_commit=$(git rev-parse --verify "${generation_commit}^{commit}" 2>/dev/null); then
+            if ! git fetch --no-tags --depth=1 origin "$generation_commit"; then
+              echo "::error::Fern current_generation commit $generation_commit is not present in the checkout and could not be fetched from origin. Ensure it is reachable from a remote ref before finalizing."
+              exit 1
+            fi
+            target_commit=$(git rev-parse --verify "${generation_commit}^{commit}")
+          fi
+
+          existing_commit=$(git rev-parse -q --verify "refs/tags/${generation_tag}^{commit}" || true)
+
+          if [[ -n "$existing_commit" ]]; then
+            if [[ "$existing_commit" == "$target_commit" ]]; then
+              echo "Tag $generation_tag already points at $target_commit."
+              {
+                echo "tag=$generation_tag"
+                echo "created=false"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "::error::Tag $generation_tag already points at $existing_commit, not $target_commit."
+            exit 1
+          fi
+
+          git tag "$generation_tag" "$target_commit"
+          git push origin "refs/tags/$generation_tag"
+
+          {
+            echo "tag=$generation_tag"
+            echo "created=true"
+          } >> "$GITHUB_OUTPUT"
