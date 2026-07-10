@@ -9,8 +9,8 @@ Releases are automated by **release-please** (`.github/workflows/release-please.
 It maintains a rolling release PR off `main` and decides the next version
 **entirely from commit-message prefixes**, so every commit must follow
 [Conventional Commits](https://www.conventionalcommits.org). A release also
-rewrites the sibling-action pins inside `sync-fern-artifacts.yml` in lockstep,
-and tags are unprefixed (`1.0.0`, not `v1.0.0`).
+rewrites the sibling-action pins inside reusable workflows in lockstep, and
+tags are unprefixed (`1.0.0`, not `v1.0.0`).
 
 ### Which prefixes cut a release
 
@@ -31,7 +31,7 @@ Everything else — `ci`, `chore`, `docs`, `build`, `refactor`, `test`, `style`,
 Use a releasing prefix (`feat`/`fix`/`deps`) **only** when the change touches the
 consumer-facing surface — the composite actions (`bundle-openapi-spec`,
 `extract-code-examples`, `commit-artifacts`, `verify-openapi-spec`) or the
-`sync-fern-artifacts.yml` reusable workflow that SDK repos call.
+reusable workflows that SDK repos call.
 
 For changes with **no effect on external consumers**, use a non-releasing prefix
 so release-please doesn't cut a pointless release:
@@ -49,4 +49,5 @@ there is no config knob to exempt a type or scope from releasing.
 
 Use the action or workflow name as the scope, e.g.
 `fix(extract-code-examples): …`, `ci(release-please): …`,
-`feat(sync-fern-artifacts): …`.
+`feat(sync-fern-artifacts): …`, `feat(sdk-release-gate): …`,
+`feat(sdk-release-finalize): …`.

@@ -19,6 +19,14 @@ Shared GitHub Actions and reusable workflows for the Phenoml SDK repos.
 
 ## Reusable workflows
 
+- [`sdk-release-gate`](.github/workflows/sdk-release-gate.yml) — runs the
+  shared pre-publish release gate for generated SDKs: extract the SDK version,
+  skip already-tagged versions, verify the bundled OpenAPI spec, and validate
+  the `originGitCommit` tag name. Version tags, origin commit tags, GitHub
+  releases, package builds, and registry publish jobs stay in each SDK repo.
+- [`sdk-release-finalize`](.github/workflows/sdk-release-finalize.yml) —
+  creates release-discovery tags after an SDK package publish succeeds: the
+  normal SDK version tag/release and the Fern `originGitCommit` tag.
 - [`sync-fern-artifacts`](.github/workflows/sync-fern-artifacts.yml) — runs
   bundle → extract → commit in a single ordered run, so the bundled spec and
   its derived `code-examples.json` are always generated together and land in
