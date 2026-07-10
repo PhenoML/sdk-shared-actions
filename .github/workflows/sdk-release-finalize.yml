@@ -1,26 +1,28 @@
 name: sdk-release-finalize
 
-# Reusable workflow: create release-discovery tags after registry publishing
-# succeeds and preserve Fern's current replay generation commit for the next
-# autorelease. Call this from SDK repos after npm/PyPI/Maven publish completes,
-# passing the version_tag, origin_commit, and origin_tag outputs from
-# sdk-release-gate. Keeping these side effects post-publish means failed
-# registry publishes can be retried without a pre-created tag blocking them.
+# Reusable reconciliation workflow: ensure release state exists after registry
+# publishing succeeds. It is safe to call after publish succeeded in this run,
+# publish previously succeeded but finalization failed, or the SDK version tag
+# already exists and origin/Fern tags need repair. Call this from SDK repos after
+# npm/PyPI/Maven publish completes, passing the version_tag, origin_commit, and
+# origin_tag outputs from sdk-release-gate. Keeping these side effects
+# post-publish means failed registry publishes can be retried without a
+# pre-created tag blocking them.
 on:
   workflow_call:
     inputs:
       version-tag:
-        description: "The SDK version tag to create, usually sdk-release-gate's version_tag output."
+        description: "The SDK version tag to ensure exists, usually sdk-release-gate's version_tag output."
         type: string
         required: true
       origin-commit:
-        description: "Fern's originGitCommit, usually sdk-release-gate's origin_commit output."
+        description: "Fern's originGitCommit, usually sdk-release-gate's origin_commit output. Required when create-origin-tag is true."
         type: string
-        required: true
+        default: ""
       origin-tag:
-        description: "The origin release tag to create, usually sdk-release-gate's origin_tag output."
+        description: "The origin release tag to ensure exists, usually sdk-release-gate's origin_tag output. Required when create-origin-tag is true."
         type: string
-        required: true
+        default: ""
       tag-target:
         description: "Git revision to tag. Defaults to the caller workflow commit."
         type: string
@@ -33,7 +35,18 @@ on:
         description: "Whether to create a GitHub release for the version tag."
         type: boolean
         default: true
+      create-origin-tag:
+        description: "Whether to ensure the Fern originGitCommit release tag exists."
+        type: boolean
+        default: true
+      preserve-fern-generation:
+        description: "Whether to ensure Fern's replay generation tag exists when replay.lock is present."
+        type: boolean
+        default: true
     outputs:
+      finalized:
+        description: "true after all expected release metadata has been verified."
+        value: ${{ jobs.finalize.outputs.finalized }}
       version_tag:
         description: "The version tag created or verified by this workflow."
         value: ${{ jobs.finalize.outputs.version_tag }}
@@ -44,13 +57,13 @@ on:
         description: "The origin release tag created or verified by this workflow."
         value: ${{ jobs.finalize.outputs.origin_tag }}
       origin_tag_created:
-        description: "true when a new origin release tag was pushed; false when it already existed."
+        description: "true when a new origin release tag was pushed; false when it already existed or origin tag reconciliation is disabled."
         value: ${{ jobs.finalize.outputs.origin_tag_created }}
       fern_generation_tag:
         description: "The Fern replay generation tag created or verified by this workflow, or empty when replay.lock is absent."
         value: ${{ jobs.finalize.outputs.fern_generation_tag }}
       fern_generation_tag_created:
-        description: "true when a new Fern replay generation tag was pushed; false when it already existed or replay.lock is absent."
+        description: "true when a new Fern replay generation tag was pushed; false when it already existed, replay.lock is absent, or Fern generation preservation is disabled."
         value: ${{ jobs.finalize.outputs.fern_generation_tag_created }}
 
 permissions:
@@ -60,18 +73,20 @@ jobs:
   finalize:
     runs-on: ubuntu-latest
     outputs:
+      finalized: ${{ steps.verify-final-state.outputs.finalized }}
       version_tag: ${{ steps.inputs.outputs.version_tag }}
       version_tag_created: ${{ steps.version-tag-output.outputs.created }}
       origin_tag: ${{ steps.inputs.outputs.origin_tag }}
-      origin_tag_created: ${{ steps.origin-tag.outputs.created }}
+      origin_tag_created: ${{ steps.origin-tag.outputs.created || 'false' }}
       fern_generation_tag: ${{ steps.fern-generation-tag.outputs.tag }}
-      fern_generation_tag_created: ${{ steps.fern-generation-tag.outputs.created }}
+      fern_generation_tag_created: ${{ steps.fern-generation-tag.outputs.created || 'false' }}
     env:
       VERSION_TAG: ${{ inputs.version-tag }}
       ORIGIN_COMMIT: ${{ inputs.origin-commit }}
       ORIGIN_TAG: ${{ inputs.origin-tag }}
       TAG_TARGET: ${{ inputs.tag-target }}
       REPLAY_LOCK_PATH: ${{ inputs.replay-lock-path }}
+      CREATE_ORIGIN_TAG: ${{ inputs.create-origin-tag }}
     steps:
       - name: Checkout release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -106,13 +121,14 @@ jobs:
             fi
           }
 
-          if [[ -z "$ORIGIN_COMMIT" ]]; then
-            echo "::error::origin-commit is required."
-            exit 1
-          fi
-
           validate_tag "version-tag" "$VERSION_TAG"
-          validate_tag "origin-tag" "$ORIGIN_TAG"
+          if [[ "$CREATE_ORIGIN_TAG" == "true" ]]; then
+            if [[ -z "$ORIGIN_COMMIT" ]]; then
+              echo "::error::origin-commit is required when create-origin-tag is true."
+              exit 1
+            fi
+            validate_tag "origin-tag" "$ORIGIN_TAG"
+          fi
           git rev-parse --verify "${TAG_TARGET}^{commit}" >/dev/null
 
           {
@@ -120,7 +136,7 @@ jobs:
             echo "origin_tag=$ORIGIN_TAG"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create version tag and GitHub release
+      - name: Ensure SDK version release exists
         id: version-tag
         if: inputs.create-github-release
         env:
@@ -137,8 +153,21 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
-            echo "GitHub release $VERSION_TAG already exists."
+          if release_tag_name=$(gh release view "$VERSION_TAG" --json tagName --jq .tagName 2>/dev/null); then
+            if [[ "$release_tag_name" != "$VERSION_TAG" ]]; then
+              echo "::error::GitHub release lookup for $VERSION_TAG returned tagName=$release_tag_name."
+              exit 1
+            fi
+            if [[ -z "$existing_commit" ]]; then
+              echo "::error::GitHub release $VERSION_TAG exists, but tag $VERSION_TAG was not found."
+              exit 1
+            fi
+            if [[ "$existing_commit" != "$target_commit" ]]; then
+              echo "::error::GitHub release $VERSION_TAG exists, but tag $VERSION_TAG points at $existing_commit, not $target_commit."
+              exit 1
+            fi
+
+            echo "GitHub release $VERSION_TAG and tag $VERSION_TAG already point at $target_commit."
             echo "created=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -150,7 +179,7 @@ jobs:
 
           echo "created=true" >> "$GITHUB_OUTPUT"
 
-      - name: Create version tag
+      - name: Ensure SDK version tag exists
         id: raw-version-tag
         if: "!inputs.create-github-release"
         shell: bash
@@ -186,8 +215,9 @@ jobs:
           RAW_CREATED: ${{ steps.raw-version-tag.outputs.created }}
         run: echo "created=${RELEASE_CREATED:-$RAW_CREATED}" >> "$GITHUB_OUTPUT"
 
-      - name: Create originGitCommit tag
+      - name: Ensure originGitCommit tag exists
         id: origin-tag
+        if: inputs.create-origin-tag
         shell: bash
         run: |
           set -euo pipefail
@@ -213,8 +243,9 @@ jobs:
 
           echo "created=true" >> "$GITHUB_OUTPUT"
 
-      - name: Preserve Fern replay generation
+      - name: Ensure Fern replay generation tag exists
         id: fern-generation-tag
+        if: inputs.preserve-fern-generation
         shell: bash
         run: |
           set -euo pipefail
@@ -276,3 +307,80 @@ jobs:
             echo "tag=$generation_tag"
             echo "created=true"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Verify finalized release state
+        id: verify-final-state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATE_GITHUB_RELEASE: ${{ inputs.create-github-release }}
+          CREATE_ORIGIN_TAG: ${{ inputs.create-origin-tag }}
+          PRESERVE_FERN_GENERATION: ${{ inputs.preserve-fern-generation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_tag() {
+            local label="$1"
+            local tag="$2"
+            local expected_commit="$3"
+            local actual_commit
+
+            actual_commit=$(git rev-parse -q --verify "refs/tags/${tag}^{commit}" || true)
+            if [[ -z "$actual_commit" ]]; then
+              echo "::error::$label tag $tag does not exist."
+              exit 1
+            fi
+            if [[ "$actual_commit" != "$expected_commit" ]]; then
+              echo "::error::$label tag $tag points at $actual_commit, not $expected_commit."
+              exit 1
+            fi
+
+            echo "$label tag $tag points at $expected_commit."
+          }
+
+          target_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
+          git fetch --force --tags origin
+
+          verify_tag "SDK version" "$VERSION_TAG" "$target_commit"
+
+          if [[ "$CREATE_GITHUB_RELEASE" == "true" ]]; then
+            release_tag_name=$(gh release view "$VERSION_TAG" --json tagName --jq .tagName)
+            if [[ "$release_tag_name" != "$VERSION_TAG" ]]; then
+              echo "::error::GitHub release $VERSION_TAG has tagName=$release_tag_name."
+              exit 1
+            fi
+            echo "GitHub release $VERSION_TAG uses tagName=$VERSION_TAG."
+          fi
+
+          if [[ "$CREATE_ORIGIN_TAG" == "true" ]]; then
+            verify_tag "originGitCommit" "$ORIGIN_TAG" "$target_commit"
+          fi
+
+          if [[ "$PRESERVE_FERN_GENERATION" == "true" ]]; then
+            if replay_lock=$(git show "${target_commit}:${REPLAY_LOCK_PATH}" 2>/dev/null); then
+              generation_commit=$(printf '%s\n' "$replay_lock" | sed -n 's/^current_generation:[[:space:]]*//p' | head -n1)
+              if [[ -z "$generation_commit" ]]; then
+                echo "::error::$REPLAY_LOCK_PATH at $target_commit has no current_generation field."
+                exit 1
+              fi
+              if ! printf '%s' "$generation_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+                echo "::error::Invalid Fern current_generation SHA: $generation_commit"
+                exit 1
+              fi
+
+              generation_tag="fern-generation/$generation_commit"
+              if ! generation_target=$(git rev-parse --verify "${generation_commit}^{commit}" 2>/dev/null); then
+                if ! git fetch --no-tags --depth=1 origin "$generation_commit"; then
+                  echo "::error::Fern current_generation commit $generation_commit is not present in the checkout and could not be fetched from origin."
+                  exit 1
+                fi
+                generation_target=$(git rev-parse --verify "${generation_commit}^{commit}")
+              fi
+
+              verify_tag "Fern replay generation" "$generation_tag" "$generation_target"
+            else
+              echo "::notice::$REPLAY_LOCK_PATH does not exist at $target_commit; no Fern replay generation tag expected."
+            fi
+          fi
+
+          echo "finalized=true" >> "$GITHUB_OUTPUT"

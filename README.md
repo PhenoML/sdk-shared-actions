@@ -26,10 +26,10 @@ Shared GitHub Actions and reusable workflows for the Phenoml SDK repos.
   origin release tags, GitHub releases, package builds, and registry publish
   jobs stay in each SDK repo.
 - [`sdk-release-finalize`](.github/workflows/sdk-release-finalize.yml) —
-  creates release-discovery tags after an SDK package publish succeeds: the
-  normal SDK version tag/release, a Fern origin release tag, and, when Fern
-  Replay is configured, a stable tag preserving Fern's replay generation commit
-  for the next autorelease.
+  reconciles release metadata after an SDK package publish succeeds: it ensures
+  the normal SDK version tag/release, the Fern origin release tag, and, when
+  Fern Replay is configured, the stable replay generation tag all exist and
+  point at the expected commits.
 - [`sync-fern-artifacts`](.github/workflows/sync-fern-artifacts.yml) — runs
   bundle → extract → commit in a single ordered run, so the bundled spec and
   its derived `code-examples.json` are always generated together and land in
