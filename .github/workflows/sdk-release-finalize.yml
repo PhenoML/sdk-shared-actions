@@ -223,7 +223,20 @@ jobs:
           set -euo pipefail
 
           target_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
-          existing_commit=$(git rev-parse -q --verify "refs/tags/${ORIGIN_TAG}^{commit}" || true)
+          existing_ref=""
+          existing_commit=""
+          if git ls-remote --exit-code --refs origin "refs/tags/${ORIGIN_TAG}" >/dev/null; then
+            git fetch --force --no-tags origin "refs/tags/${ORIGIN_TAG}:refs/tags/${ORIGIN_TAG}"
+            existing_ref=$(git rev-parse --verify "refs/tags/${ORIGIN_TAG}")
+            existing_commit=$(git rev-parse --verify "refs/tags/${ORIGIN_TAG}^{commit}")
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then
+              echo "::error::Could not read remote tag $ORIGIN_TAG from origin."
+              exit "$status"
+            fi
+            git tag -d "$ORIGIN_TAG" 2>/dev/null || true
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -238,7 +251,7 @@ jobs:
             if git merge-base --is-ancestor "$existing_commit" "$target_commit"; then
               echo "Moving tag $ORIGIN_TAG from $existing_commit to $target_commit."
               git tag -f -a "$ORIGIN_TAG" "$target_commit" -m "Latest SDK release for Fern originGitCommit $ORIGIN_COMMIT"
-              git push --force origin "refs/tags/$ORIGIN_TAG"
+              git push --force-with-lease="refs/tags/$ORIGIN_TAG:$existing_ref" origin "refs/tags/$ORIGIN_TAG"
               echo "created=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
