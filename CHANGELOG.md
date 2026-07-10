@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.3...1.1.0) (2026-07-10)
+
+
+### Features
+
+* **sdk-release-workflows:** add shared SDK release flow ([#38](https://github.com/PhenoML/sdk-shared-actions/issues/38)) ([8f8f7e6](https://github.com/PhenoML/sdk-shared-actions/commit/8f8f7e6680b489a2518149d95cfa78c304a9bd89))
+
 ## [1.0.3](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.2...1.0.3) (2026-06-25)
 
 
