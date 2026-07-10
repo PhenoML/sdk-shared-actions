@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/PhenoML/sdk-shared-actions/compare/1.2.0...1.3.0) (2026-07-10)
+
+
+### Features
+
+* **sdk-release-gate:** expose release states ([#44](https://github.com/PhenoML/sdk-shared-actions/issues/44)) ([9c751a1](https://github.com/PhenoML/sdk-shared-actions/commit/9c751a1e8d2b5714362d1c60db934354a6f1c85e))
+
 ## [1.2.0](https://github.com/PhenoML/sdk-shared-actions/compare/1.1.1...1.2.0) (2026-07-10)
 
 

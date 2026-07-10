@@ -219,7 +219,7 @@ jobs:
 
       - name: Verify bundled OpenAPI spec
         if: steps.check.outputs.should_publish == 'true'
-        uses: PhenoML/sdk-shared-actions/verify-openapi-spec@1.2.0 # x-release-please-version
+        uses: PhenoML/sdk-shared-actions/verify-openapi-spec@1.3.0 # x-release-please-version
         with:
           metadata-path: ${{ env.METADATA_PATH }}
           spec-path: ${{ env.SPEC_PATH }}
