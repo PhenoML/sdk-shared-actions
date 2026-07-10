@@ -140,8 +140,6 @@ jobs:
 
       - name: Read originGitCommit
         id: origin
-        env:
-          VERSION_TAG: ${{ steps.version.outputs.version_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -157,7 +155,7 @@ jobs:
             exit 1
           fi
 
-          origin_tag="backend-origin/${origin_commit}/${VERSION_TAG}"
+          origin_tag="backend-origin/${origin_commit}"
           if [[ "$origin_tag" == -* ]]; then
             echo "::error::Origin tag must not begin with '-': $origin_tag"
             exit 1
