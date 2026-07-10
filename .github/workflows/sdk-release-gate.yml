@@ -3,10 +3,10 @@ name: sdk-release-gate
 # Reusable workflow: perform the shared SDK release gate used before package
 # publishing. It extracts the generated SDK version, checks whether that
 # version is already tagged, reads Fern's originGitCommit, verifies the bundled
-# OpenAPI spec, and validates the origin release tag name. It intentionally
-# does not create release tags or GitHub releases: callers should do that after
-# registry publishing succeeds so failed publishes can be retried for the same
-# version.
+# OpenAPI spec for new publishes, and validates the origin release tag name. It
+# intentionally does not create release tags or GitHub releases: callers should
+# do that after registry publishing succeeds so failed publishes can be retried
+# for the same version.
 on:
   workflow_call:
     inputs:
@@ -36,14 +36,23 @@ on:
         default: ""
     outputs:
       should_publish:
-        description: "true when the version tag did not already exist."
+        description: "true only when the version tag did not already exist and callers should publish."
         value: ${{ jobs.check.outputs.should_publish }}
+      should_finalize:
+        description: "true when callers should run release finalization after publish succeeds or to repair already-published metadata."
+        value: ${{ jobs.check.outputs.should_finalize }}
+      release_state:
+        description: "publish when the version tag is absent, repair when it already points at this commit, or skip when it points at another commit."
+        value: ${{ jobs.check.outputs.release_state }}
       version:
         description: "The SDK version read from the caller repo."
         value: ${{ jobs.check.outputs.version }}
       version_tag:
         description: "The version tag checked by this workflow."
         value: ${{ jobs.check.outputs.version_tag }}
+      existing_version_tag_commit:
+        description: "The commit currently pointed to by version_tag, or empty when the tag does not exist."
+        value: ${{ jobs.check.outputs.existing_version_tag_commit }}
       origin_commit:
         description: "The originGitCommit value read from metadata.json."
         value: ${{ jobs.check.outputs.origin_commit }}
@@ -59,8 +68,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_publish: ${{ steps.check.outputs.should_publish }}
+      should_finalize: ${{ steps.check.outputs.should_finalize }}
+      release_state: ${{ steps.check.outputs.release_state }}
       version: ${{ steps.version.outputs.version }}
       version_tag: ${{ steps.version.outputs.version_tag }}
+      existing_version_tag_commit: ${{ steps.check.outputs.existing_version_tag_commit }}
       origin_commit: ${{ steps.origin.outputs.origin_commit }}
       origin_tag: ${{ steps.origin.outputs.origin_tag }}
     env:
@@ -178,16 +190,32 @@ jobs:
 
           if [[ -n "$existing_commit" ]]; then
             if [[ "$existing_commit" == "$target_commit" ]]; then
-              echo "Tag $VERSION_TAG already points at $target_commit, skipping publish."
-              echo "should_publish=false" >> "$GITHUB_OUTPUT"
+              echo "Tag $VERSION_TAG already points at $target_commit; skipping publish and allowing finalization repair."
+              {
+                echo "should_publish=false"
+                echo "should_finalize=true"
+                echo "release_state=repair"
+                echo "existing_version_tag_commit=$existing_commit"
+              } >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            echo "::error::Tag $VERSION_TAG already points at $existing_commit, not $target_commit."
-            exit 1
+            echo "Tag $VERSION_TAG already points at $existing_commit, not $target_commit; this commit is not the release commit."
+            {
+              echo "should_publish=false"
+              echo "should_finalize=false"
+              echo "release_state=skip"
+              echo "existing_version_tag_commit=$existing_commit"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "should_publish=true"
+            echo "should_finalize=true"
+            echo "release_state=publish"
+            echo "existing_version_tag_commit="
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify bundled OpenAPI spec
         if: steps.check.outputs.should_publish == 'true'
