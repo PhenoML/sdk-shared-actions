@@ -12,6 +12,9 @@ It maintains a rolling release PR off `main` and decides the next version
 rewrites the sibling-action pins inside reusable workflows in lockstep, and
 tags are unprefixed (`1.0.0`, not `v1.0.0`).
 
+PR titles should also use Conventional Commit format, because squash merges use
+the PR title as the final commit message by default.
+
 ### Which prefixes cut a release
 
 A commit triggers a release **only** if its prefix is:
