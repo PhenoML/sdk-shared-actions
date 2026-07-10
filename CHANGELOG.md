@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/PhenoML/sdk-shared-actions/compare/1.3.0...1.3.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **sdk-release-workflows:** use moving backend origin tags ([#46](https://github.com/PhenoML/sdk-shared-actions/issues/46)) ([b2c3715](https://github.com/PhenoML/sdk-shared-actions/commit/b2c3715f3aefddac98c7311ba8a9ff514365929d))
+
 ## [1.3.0](https://github.com/PhenoML/sdk-shared-actions/compare/1.2.0...1.3.0) (2026-07-10)
 
 
