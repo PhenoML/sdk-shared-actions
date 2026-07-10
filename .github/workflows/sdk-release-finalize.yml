@@ -54,13 +54,13 @@ on:
         description: "true when a new version tag or release was created; false when it already existed."
         value: ${{ jobs.finalize.outputs.version_tag_created }}
       origin_tag:
-        description: "The origin release tag created or verified by this workflow."
+        description: "The origin release tag created or verified by this workflow, or the unverified input when origin tag reconciliation is disabled."
         value: ${{ jobs.finalize.outputs.origin_tag }}
       origin_tag_created:
         description: "true when a new origin release tag was pushed; false when it already existed or origin tag reconciliation is disabled."
         value: ${{ jobs.finalize.outputs.origin_tag_created }}
       fern_generation_tag:
-        description: "The Fern replay generation tag created or verified by this workflow, or empty when replay.lock is absent."
+        description: "The Fern replay generation tag created or verified by this workflow, or empty when replay.lock is absent or Fern generation preservation is disabled."
         value: ${{ jobs.finalize.outputs.fern_generation_tag }}
       fern_generation_tag_created:
         description: "true when a new Fern replay generation tag was pushed; false when it already existed, replay.lock is absent, or Fern generation preservation is disabled."
