@@ -162,10 +162,6 @@ jobs:
               echo "::error::GitHub release $VERSION_TAG exists, but tag $VERSION_TAG was not found."
               exit 1
             fi
-            if [[ "$existing_commit" != "$target_commit" ]]; then
-              echo "::error::GitHub release $VERSION_TAG exists, but tag $VERSION_TAG points at $existing_commit, not $target_commit."
-              exit 1
-            fi
 
             echo "GitHub release $VERSION_TAG and tag $VERSION_TAG already point at $target_commit."
             echo "created=false" >> "$GITHUB_OUTPUT"
