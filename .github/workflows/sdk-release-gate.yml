@@ -30,10 +30,6 @@ on:
         description: "Optional prefix to prepend to the SDK version tag."
         type: string
         default: ""
-      origin-tag-prefix:
-        description: "Optional prefix to prepend to the origin tag, before originGitCommit/version_tag."
-        type: string
-        default: ""
     outputs:
       should_publish:
         description: "true only when the version tag did not already exist and callers should publish."
@@ -81,7 +77,6 @@ jobs:
       SPEC_PATH: ${{ inputs.spec-path }}
       METADATA_PATH: ${{ inputs.metadata-path }}
       VERSION_TAG_PREFIX: ${{ inputs.version-tag-prefix }}
-      ORIGIN_TAG_PREFIX: ${{ inputs.origin-tag-prefix }}
     steps:
       - name: Checkout release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -162,7 +157,7 @@ jobs:
             exit 1
           fi
 
-          origin_tag="${ORIGIN_TAG_PREFIX}${origin_commit}/${VERSION_TAG}"
+          origin_tag="fern-origin/${origin_commit}/${VERSION_TAG}"
           if [[ "$origin_tag" == -* ]]; then
             echo "::error::Origin tag must not begin with '-': $origin_tag"
             exit 1
