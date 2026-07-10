@@ -1,0 +1,197 @@
+name: sdk-release-gate
+
+# Reusable workflow: perform the shared SDK release gate used before package
+# publishing. It extracts the generated SDK version, checks whether that
+# version is already tagged, reads Fern's originGitCommit, verifies the bundled
+# OpenAPI spec, and validates the origin release tag name. It intentionally
+# does not create release tags or GitHub releases: callers should do that after
+# registry publishing succeeds so failed publishes can be retried for the same
+# version.
+on:
+  workflow_call:
+    inputs:
+      version-source:
+        description: "Where to read the SDK version from: package-json, pyproject, or gradle."
+        type: string
+        required: true
+      version-path:
+        description: "Path to the version file within the caller repo."
+        type: string
+        required: true
+      spec-path:
+        description: "Path to the bundled OpenAPI spec within the caller repo."
+        type: string
+        required: true
+      metadata-path:
+        description: "Path to Fern's metadata.json within the caller repo."
+        type: string
+        default: ".fern/metadata.json"
+      version-tag-prefix:
+        description: "Optional prefix to prepend to the SDK version tag."
+        type: string
+        default: ""
+      origin-tag-prefix:
+        description: "Optional prefix to prepend to the origin tag, before originGitCommit/version_tag."
+        type: string
+        default: ""
+    outputs:
+      should_publish:
+        description: "true when the version tag did not already exist."
+        value: ${{ jobs.check.outputs.should_publish }}
+      version:
+        description: "The SDK version read from the caller repo."
+        value: ${{ jobs.check.outputs.version }}
+      version_tag:
+        description: "The version tag checked by this workflow."
+        value: ${{ jobs.check.outputs.version_tag }}
+      origin_commit:
+        description: "The originGitCommit value read from metadata.json."
+        value: ${{ jobs.check.outputs.origin_commit }}
+      origin_tag:
+        description: "The validated origin release tag name."
+        value: ${{ jobs.check.outputs.origin_tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.version.outputs.version }}
+      version_tag: ${{ steps.version.outputs.version_tag }}
+      origin_commit: ${{ steps.origin.outputs.origin_commit }}
+      origin_tag: ${{ steps.origin.outputs.origin_tag }}
+    env:
+      VERSION_SOURCE: ${{ inputs.version-source }}
+      VERSION_PATH: ${{ inputs.version-path }}
+      SPEC_PATH: ${{ inputs.spec-path }}
+      METADATA_PATH: ${{ inputs.metadata-path }}
+      VERSION_TAG_PREFIX: ${{ inputs.version-tag-prefix }}
+      ORIGIN_TAG_PREFIX: ${{ inputs.origin-tag-prefix }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        shell: bash
+        run: git fetch --force --tags origin
+
+      - name: Extract SDK version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$VERSION_PATH" ]]; then
+            echo "::error::$VERSION_PATH does not exist."
+            exit 1
+          fi
+
+          case "$VERSION_SOURCE" in
+            package-json)
+              version=$(jq -r '.version // empty' "$VERSION_PATH")
+              ;;
+            pyproject)
+              version=$(sed -n "s/^version[[:space:]]*=[[:space:]]*['\"]\\([^'\"]*\\)['\"][[:space:]]*$/\\1/p" "$VERSION_PATH" | head -n1)
+              ;;
+            gradle)
+              version=$(sed -n "s/^version[[:space:]]*=[[:space:]]*['\"]\\([^'\"]*\\)['\"].*/\\1/p" "$VERSION_PATH" | head -n1)
+              ;;
+            *)
+              echo "::error::Unsupported version-source '$VERSION_SOURCE'. Expected package-json, pyproject, or gradle."
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "$version" ]]; then
+            echo "::error::Could not read SDK version from $VERSION_PATH using version-source '$VERSION_SOURCE'."
+            exit 1
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[A-Za-z0-9._+-]+$'; then
+            echo "::error::Refusing to publish: version '$version' contains unexpected characters."
+            exit 1
+          fi
+
+          version_tag="${VERSION_TAG_PREFIX}${version}"
+          if [[ "$version_tag" == -* ]]; then
+            echo "::error::Version tag must not begin with '-': $version_tag"
+            exit 1
+          fi
+          if ! git check-ref-format "refs/tags/$version_tag"; then
+            echo "::error::Invalid version tag name: $version_tag"
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "version_tag=$version_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read originGitCommit
+        id: origin
+        env:
+          VERSION_TAG: ${{ steps.version.outputs.version_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$METADATA_PATH" ]]; then
+            echo "::error::$METADATA_PATH does not exist."
+            exit 1
+          fi
+
+          origin_commit=$(jq -r '.originGitCommit // empty' "$METADATA_PATH")
+          if [[ -z "$origin_commit" ]]; then
+            echo "::error::$METADATA_PATH has no originGitCommit field."
+            exit 1
+          fi
+
+          origin_tag="${ORIGIN_TAG_PREFIX}${origin_commit}/${VERSION_TAG}"
+          if [[ "$origin_tag" == -* ]]; then
+            echo "::error::Origin tag must not begin with '-': $origin_tag"
+            exit 1
+          fi
+          if ! git check-ref-format "refs/tags/$origin_tag"; then
+            echo "::error::originGitCommit produced an invalid Git tag name: $origin_tag"
+            exit 1
+          fi
+
+          {
+            echo "origin_commit=$origin_commit"
+            echo "origin_tag=$origin_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check version tag
+        id: check
+        env:
+          VERSION_TAG: ${{ steps.version.outputs.version_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_commit=$(git rev-parse --verify "HEAD^{commit}")
+          existing_commit=$(git rev-parse -q --verify "refs/tags/${VERSION_TAG}^{commit}" || true)
+
+          if [[ -n "$existing_commit" ]]; then
+            if [[ "$existing_commit" == "$target_commit" ]]; then
+              echo "Tag $VERSION_TAG already points at $target_commit, skipping publish."
+              echo "should_publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "::error::Tag $VERSION_TAG already points at $existing_commit, not $target_commit."
+            exit 1
+          fi
+
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify bundled OpenAPI spec
+        if: steps.check.outputs.should_publish == 'true'
+        uses: PhenoML/sdk-shared-actions/verify-openapi-spec@1.0.3 # x-release-please-version
+        with:
+          metadata-path: ${{ env.METADATA_PATH }}
+          spec-path: ${{ env.SPEC_PATH }}

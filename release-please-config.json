@@ -9,6 +9,10 @@
         {
           "type": "generic",
           "path": ".github/workflows/sync-fern-artifacts.yml"
+        },
+        {
+          "type": "generic",
+          "path": ".github/workflows/sdk-release-gate.yml"
         }
       ]
     }

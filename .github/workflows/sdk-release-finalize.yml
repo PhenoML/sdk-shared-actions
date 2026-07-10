@@ -1,0 +1,200 @@
+name: sdk-release-finalize
+
+# Reusable workflow: create release-discovery tags after registry publishing
+# succeeds. Call this from SDK repos after npm/PyPI/Maven publish completes,
+# passing the version_tag, origin_commit, and origin_tag outputs from
+# sdk-release-gate. Keeping these side effects post-publish means failed
+# registry publishes can be retried without a pre-created tag blocking them.
+on:
+  workflow_call:
+    inputs:
+      version-tag:
+        description: "The SDK version tag to create, usually sdk-release-gate's version_tag output."
+        type: string
+        required: true
+      origin-commit:
+        description: "Fern's originGitCommit, usually sdk-release-gate's origin_commit output."
+        type: string
+        required: true
+      origin-tag:
+        description: "The origin release tag to create, usually sdk-release-gate's origin_tag output."
+        type: string
+        required: true
+      tag-target:
+        description: "Git revision to tag. Defaults to the caller workflow commit."
+        type: string
+        default: "HEAD"
+      create-github-release:
+        description: "Whether to create a GitHub release for the version tag."
+        type: boolean
+        default: true
+    outputs:
+      version_tag:
+        description: "The version tag created or verified by this workflow."
+        value: ${{ jobs.finalize.outputs.version_tag }}
+      version_tag_created:
+        description: "true when a new version tag or release was created; false when it already existed."
+        value: ${{ jobs.finalize.outputs.version_tag_created }}
+      origin_tag:
+        description: "The origin release tag created or verified by this workflow."
+        value: ${{ jobs.finalize.outputs.origin_tag }}
+      origin_tag_created:
+        description: "true when a new origin release tag was pushed; false when it already existed."
+        value: ${{ jobs.finalize.outputs.origin_tag_created }}
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ steps.inputs.outputs.version_tag }}
+      version_tag_created: ${{ steps.version-tag-output.outputs.created }}
+      origin_tag: ${{ steps.inputs.outputs.origin_tag }}
+      origin_tag_created: ${{ steps.origin-tag.outputs.created }}
+    env:
+      VERSION_TAG: ${{ inputs.version-tag }}
+      ORIGIN_COMMIT: ${{ inputs.origin-commit }}
+      ORIGIN_TAG: ${{ inputs.origin-tag }}
+      TAG_TARGET: ${{ inputs.tag-target }}
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        shell: bash
+        run: git fetch --force --tags origin
+
+      - name: Validate inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          validate_tag() {
+            local label="$1"
+            local tag="$2"
+
+            if [[ -z "$tag" ]]; then
+              echo "::error::$label is required."
+              exit 1
+            fi
+            if [[ "$tag" == -* ]]; then
+              echo "::error::$label must not begin with '-': $tag"
+              exit 1
+            fi
+            if ! git check-ref-format "refs/tags/$tag"; then
+              echo "::error::Invalid $label: $tag"
+              exit 1
+            fi
+          }
+
+          if [[ -z "$ORIGIN_COMMIT" ]]; then
+            echo "::error::origin-commit is required."
+            exit 1
+          fi
+
+          validate_tag "version-tag" "$VERSION_TAG"
+          validate_tag "origin-tag" "$ORIGIN_TAG"
+          git rev-parse --verify "${TAG_TARGET}^{commit}" >/dev/null
+
+          {
+            echo "version_tag=$VERSION_TAG"
+            echo "origin_tag=$ORIGIN_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create version tag and GitHub release
+        id: version-tag
+        if: inputs.create-github-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
+          existing_commit=$(git rev-parse -q --verify "refs/tags/${VERSION_TAG}^{commit}" || true)
+
+          if [[ -n "$existing_commit" && "$existing_commit" != "$target_commit" ]]; then
+            echo "::error::Tag $VERSION_TAG already points at $existing_commit, not $target_commit."
+            exit 1
+          fi
+
+          if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
+            echo "GitHub release $VERSION_TAG already exists."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh release create "$VERSION_TAG" \
+            --target "$target_commit" \
+            --title "$VERSION_TAG" \
+            --generate-notes
+
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create version tag
+        id: raw-version-tag
+        if: "!inputs.create-github-release"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
+          existing_commit=$(git rev-parse -q --verify "refs/tags/${VERSION_TAG}^{commit}" || true)
+
+          if [[ -n "$existing_commit" ]]; then
+            if [[ "$existing_commit" == "$target_commit" ]]; then
+              echo "Tag $VERSION_TAG already points at $target_commit."
+              echo "created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "::error::Tag $VERSION_TAG already points at $existing_commit, not $target_commit."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION_TAG" "$target_commit" -m "Release $VERSION_TAG"
+          git push origin "refs/tags/$VERSION_TAG"
+
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize version tag output
+        id: version-tag-output
+        shell: bash
+        env:
+          RELEASE_CREATED: ${{ steps.version-tag.outputs.created }}
+          RAW_CREATED: ${{ steps.raw-version-tag.outputs.created }}
+        run: echo "created=${RELEASE_CREATED:-$RAW_CREATED}" >> "$GITHUB_OUTPUT"
+
+      - name: Create originGitCommit tag
+        id: origin-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
+          existing_commit=$(git rev-parse -q --verify "refs/tags/${ORIGIN_TAG}^{commit}" || true)
+
+          if [[ -n "$existing_commit" ]]; then
+            if [[ "$existing_commit" == "$target_commit" ]]; then
+              echo "Tag $ORIGIN_TAG already points at $target_commit."
+              echo "created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "::error::Tag $ORIGIN_TAG already points at $existing_commit, not $target_commit."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$ORIGIN_TAG" "$target_commit" -m "Release $VERSION_TAG for Fern originGitCommit $ORIGIN_COMMIT"
+          git push origin "refs/tags/$ORIGIN_TAG"
+
+          echo "created=true" >> "$GITHUB_OUTPUT"

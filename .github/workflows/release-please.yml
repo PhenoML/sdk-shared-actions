@@ -5,18 +5,18 @@ name: release-please
 # it keeps the next version + CHANGELOG staged, and merging that PR cuts the
 # GitHub release and tags it.
 #
-# Crucially, the release also rewrites the sibling-action pins inside
-# sync-fern-artifacts.yml — every line marked `# x-release-please-version` is
-# bumped to the new version — so the reusable workflow and the composite
-# actions it calls are always released, and reference each other, in lockstep.
+# Crucially, the release also rewrites the sibling-action pins inside reusable
+# workflows — every line marked `# x-release-please-version` is bumped to the
+# new version — so the workflows and the composite actions they call are always
+# released, and reference each other, in lockstep.
 #
 # Config: release-please-config.json (release-type, extra-files to bump).
 # Current version: .release-please-manifest.json.
 # Tags are unprefixed (1.0.0, not v1.0.0) to match how the actions are
 # referenced throughout this repo (include-v-in-tag: false in the config).
 #
-# Token: because the release PR rewrites the action pins *inside*
-# sync-fern-artifacts.yml, release-please has to commit a file under
+# Token: because the release PR rewrites action pins *inside*
+# .github/workflows/, release-please has to commit files under
 # .github/workflows/. GitHub forbids the default GITHUB_TOKEN from writing
 # workflow files ("without `workflows` permission"), and `workflows` is not a
 # grantable scope on GITHUB_TOKEN — so it fails with "Error adding to tree".
