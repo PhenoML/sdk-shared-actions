@@ -57,7 +57,7 @@ on:
         description: "The origin release tag created or verified by this workflow, or the unverified input when origin tag reconciliation is disabled."
         value: ${{ jobs.finalize.outputs.origin_tag }}
       origin_tag_created:
-        description: "true when a new origin release tag was pushed; false when it already existed or origin tag reconciliation is disabled."
+        description: "true when the origin release tag was created or moved; false when it already existed or origin tag reconciliation is disabled."
         value: ${{ jobs.finalize.outputs.origin_tag_created }}
       fern_generation_tag:
         description: "The Fern replay generation tag created or verified by this workflow, or empty when replay.lock is absent or Fern generation preservation is disabled."
@@ -113,6 +113,10 @@ jobs:
             fi
             if [[ "$tag" == -* ]]; then
               echo "::error::$label must not begin with '-': $tag"
+              exit 1
+            fi
+            if [[ "$tag" =~ ^[0-9a-fA-F]{40}(/|$) ]]; then
+              echo "::error::$label must not begin with a 40-character SHA: $tag"
               exit 1
             fi
             if ! git check-ref-format "refs/tags/$tag"; then
@@ -219,7 +223,23 @@ jobs:
           set -euo pipefail
 
           target_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
-          existing_commit=$(git rev-parse -q --verify "refs/tags/${ORIGIN_TAG}^{commit}" || true)
+          existing_ref=""
+          existing_commit=""
+          if git ls-remote --exit-code --refs origin "refs/tags/${ORIGIN_TAG}" >/dev/null; then
+            git fetch --force --no-tags origin "refs/tags/${ORIGIN_TAG}:refs/tags/${ORIGIN_TAG}"
+            existing_ref=$(git rev-parse --verify "refs/tags/${ORIGIN_TAG}")
+            existing_commit=$(git rev-parse --verify "refs/tags/${ORIGIN_TAG}^{commit}")
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then
+              echo "::error::Could not read remote tag $ORIGIN_TAG from origin."
+              exit "$status"
+            fi
+            git tag -d "$ORIGIN_TAG" 2>/dev/null || true
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if [[ -n "$existing_commit" ]]; then
             if [[ "$existing_commit" == "$target_commit" ]]; then
@@ -228,13 +248,25 @@ jobs:
               exit 0
             fi
 
-            echo "::error::Tag $ORIGIN_TAG already points at $existing_commit, not $target_commit."
+            if git merge-base --is-ancestor "$existing_commit" "$target_commit"; then
+              echo "Moving tag $ORIGIN_TAG from $existing_commit to $target_commit."
+              git tag -f -a "$ORIGIN_TAG" "$target_commit" -m "Latest SDK release for Fern originGitCommit $ORIGIN_COMMIT"
+              git push --force-with-lease="refs/tags/$ORIGIN_TAG:$existing_ref" origin "refs/tags/$ORIGIN_TAG"
+              echo "created=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if git merge-base --is-ancestor "$target_commit" "$existing_commit"; then
+              echo "Tag $ORIGIN_TAG already points at newer release commit $existing_commit; leaving it in place."
+              echo "created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "::error::Tag $ORIGIN_TAG already points at divergent commit $existing_commit, not $target_commit."
             exit 1
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$ORIGIN_TAG" "$target_commit" -m "Release $VERSION_TAG for Fern originGitCommit $ORIGIN_COMMIT"
+          git tag -a "$ORIGIN_TAG" "$target_commit" -m "Latest SDK release for Fern originGitCommit $ORIGIN_COMMIT"
           git push origin "refs/tags/$ORIGIN_TAG"
 
           echo "created=true" >> "$GITHUB_OUTPUT"
@@ -334,6 +366,30 @@ jobs:
             echo "$label tag $tag points at $expected_commit."
           }
 
+          verify_moving_tag() {
+            local label="$1"
+            local tag="$2"
+            local expected_commit="$3"
+            local actual_commit
+
+            actual_commit=$(git rev-parse -q --verify "refs/tags/${tag}^{commit}" || true)
+            if [[ -z "$actual_commit" ]]; then
+              echo "::error::$label tag $tag does not exist."
+              exit 1
+            fi
+            if [[ "$actual_commit" == "$expected_commit" ]]; then
+              echo "$label tag $tag points at $expected_commit."
+              return
+            fi
+            if git merge-base --is-ancestor "$expected_commit" "$actual_commit"; then
+              echo "$label tag $tag points at newer release commit $actual_commit."
+              return
+            fi
+
+            echo "::error::$label tag $tag points at $actual_commit, not $expected_commit or a newer release commit."
+            exit 1
+          }
+
           target_commit=$(git rev-parse --verify "${TAG_TARGET}^{commit}")
           git fetch --force --tags origin
 
@@ -349,7 +405,7 @@ jobs:
           fi
 
           if [[ "$CREATE_ORIGIN_TAG" == "true" ]]; then
-            verify_tag "originGitCommit" "$ORIGIN_TAG" "$target_commit"
+            verify_moving_tag "originGitCommit" "$ORIGIN_TAG" "$target_commit"
           fi
 
           if [[ "$PRESERVE_FERN_GENERATION" == "true" ]]; then

@@ -30,10 +30,6 @@ on:
         description: "Optional prefix to prepend to the SDK version tag."
         type: string
         default: ""
-      origin-tag-prefix:
-        description: "Optional prefix to prepend to the origin tag, before originGitCommit/version_tag."
-        type: string
-        default: ""
     outputs:
       should_publish:
         description: "true only when the version tag did not already exist and callers should publish."
@@ -81,7 +77,6 @@ jobs:
       SPEC_PATH: ${{ inputs.spec-path }}
       METADATA_PATH: ${{ inputs.metadata-path }}
       VERSION_TAG_PREFIX: ${{ inputs.version-tag-prefix }}
-      ORIGIN_TAG_PREFIX: ${{ inputs.origin-tag-prefix }}
     steps:
       - name: Checkout release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -133,6 +128,10 @@ jobs:
             echo "::error::Version tag must not begin with '-': $version_tag"
             exit 1
           fi
+          if [[ "$version_tag" =~ ^[0-9a-fA-F]{40}(/|$) ]]; then
+            echo "::error::Version tag must not begin with a 40-character SHA: $version_tag"
+            exit 1
+          fi
           if ! git check-ref-format "refs/tags/$version_tag"; then
             echo "::error::Invalid version tag name: $version_tag"
             exit 1
@@ -145,8 +144,6 @@ jobs:
 
       - name: Read originGitCommit
         id: origin
-        env:
-          VERSION_TAG: ${{ steps.version.outputs.version_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -162,7 +159,7 @@ jobs:
             exit 1
           fi
 
-          origin_tag="${ORIGIN_TAG_PREFIX}${origin_commit}/${VERSION_TAG}"
+          origin_tag="backend-origin/${origin_commit}"
           if [[ "$origin_tag" == -* ]]; then
             echo "::error::Origin tag must not begin with '-': $origin_tag"
             exit 1
