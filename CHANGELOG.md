@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/PhenoML/sdk-shared-actions/compare/1.1.1...1.2.0) (2026-07-10)
+
+
+### Features
+
+* **sdk-release-finalize:** reconcile release metadata ([#42](https://github.com/PhenoML/sdk-shared-actions/issues/42)) ([58e028b](https://github.com/PhenoML/sdk-shared-actions/commit/58e028b5667948002d5bb392ce03f46f82e4e7c6))
+
 ## [1.1.1](https://github.com/PhenoML/sdk-shared-actions/compare/1.1.0...1.1.1) (2026-07-10)
 
 
