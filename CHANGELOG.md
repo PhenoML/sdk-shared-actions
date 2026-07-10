@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/PhenoML/sdk-shared-actions/compare/1.1.0...1.1.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **sdk-release-finalize:** preserve Fern generation commits ([#40](https://github.com/PhenoML/sdk-shared-actions/issues/40)) ([2fead8d](https://github.com/PhenoML/sdk-shared-actions/commit/2fead8d6c70d116e0e73ead8097ee5a5fde5f64c))
+
 ## [1.1.0](https://github.com/PhenoML/sdk-shared-actions/compare/1.0.3...1.1.0) (2026-07-10)
 
 
